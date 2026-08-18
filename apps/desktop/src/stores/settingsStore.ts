@@ -170,7 +170,17 @@ export function normalizeDuckDbWorkerMaxProcesses(value: unknown): number {
 export interface AiProviderPreset extends Omit<AiConfig, "apiKey"> {
   label: string;
   iconSlug?: string;
+  iconPath?: string;
   requiresApiKey: boolean;
+  group?: "builtin" | "partner";
+}
+
+export interface AiPartnerProviderPreset extends AiProviderPreset {
+  id: string;
+  group: "partner";
+  websiteUrl: string;
+  apiKeyUrl: string;
+  descriptionKey: string;
 }
 
 export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
@@ -360,9 +370,51 @@ export function aiProviderLabel(provider: AiProvider, t: (key: string) => string
   return AI_PROVIDER_PRESETS[provider].label;
 }
 
+export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
+  {
+    id: "jalapeno-cloud",
+    label: "Jalapeno Cloud",
+    iconPath: "/icons/ai/jalapeno-cloud.png",
+    group: "partner",
+    provider: "openai-compatible",
+    endpoint: "https://api.jalapeno-cloud.ai/v1",
+    model: "GLM-5.1",
+    models: [{ name: "GLM-5.1" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+    websiteUrl: "https://www.jalapeno-cloud.ai/",
+    apiKeyUrl: "https://www.jalapeno-cloud.ai/",
+    descriptionKey: "ai.jalapenoDescription",
+  },
+];
+
+function normalizeAiProviderEndpoint(endpoint: string): string {
+  return endpoint.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+export function getAiProviderPreset(provider: AiProvider, endpoint = ""): AiProviderPreset | AiPartnerProviderPreset {
+  const normalizedEndpoint = normalizeAiProviderEndpoint(endpoint);
+  const partnerPreset = AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.provider === provider && normalizeAiProviderEndpoint(preset.endpoint) === normalizedEndpoint);
+  return partnerPreset ?? AI_PROVIDER_PRESETS[provider];
+}
+
+export function getAiProviderPresetOption(id: string): AiProviderPreset | AiPartnerProviderPreset {
+  return AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === id) ?? AI_PROVIDER_PRESETS[id as AiProvider] ?? AI_PROVIDER_PRESETS.custom;
+}
+
+export function getAiProviderPresetId(provider: AiProvider, endpoint = ""): string {
+  const preset = getAiProviderPreset(provider, endpoint);
+  return "id" in preset ? preset.id : provider;
+}
+
+export function isAiPartnerProviderPreset(preset: AiProviderPreset | AiPartnerProviderPreset): preset is AiPartnerProviderPreset {
+  return preset.group === "partner";
+}
+
 const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.fromEntries(
   Object.entries(AI_PROVIDER_PRESETS).map(([provider, preset]) => {
-    const { label: _label, iconSlug: _iconSlug, requiresApiKey: _requiresApiKey, ...config } = preset;
+    const { label: _label, iconSlug: _iconSlug, iconPath: _iconPath, group: _group, requiresApiKey: _requiresApiKey, ...config } = preset;
     return [provider, config];
   }),
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
@@ -1814,7 +1866,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (!activeModel.value) return false;
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
-    const preset = AI_PROVIDER_PRESETS[config.provider];
+    const preset = getAiProviderPreset(config.provider, config.endpoint);
     if (
       config.provider === "codex-cli" ||
       config.provider === "claude-code-cli" ||
