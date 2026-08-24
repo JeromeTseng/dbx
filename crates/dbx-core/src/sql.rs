@@ -119,6 +119,7 @@ struct SqlDialectProfile {
     keeps_sqlserver_module_batch_at_cursor: bool,
     preserves_tdsql_leading_directives: bool,
     requires_whitespace_after_line_comment_dashes: bool,
+    supports_psql_control_commands: bool,
 }
 
 impl Default for SqlDialectProfile {
@@ -136,6 +137,7 @@ impl Default for SqlDialectProfile {
             keeps_sqlserver_module_batch_at_cursor: false,
             preserves_tdsql_leading_directives: false,
             requires_whitespace_after_line_comment_dashes: false,
+            supports_psql_control_commands: false,
         }
     }
 }
@@ -187,7 +189,11 @@ impl SqlDialectProfile {
     }
 
     fn gaussdb() -> Self {
-        Self { supports_postgres_dollar_quoted_routines: true, ..Self::oracle_like() }
+        Self {
+            supports_postgres_dollar_quoted_routines: true,
+            supports_psql_control_commands: true,
+            ..Self::oracle_like()
+        }
     }
 
     fn sql_server() -> Self {
@@ -501,6 +507,19 @@ impl SqlStatementSplitter {
                     let buf_end = self.buffer.len() - 1;
                     let last_line_start = self.buffer[..buf_end].rfind('\n').map_or(0, |p| p + 1);
                     let last_line = self.buffer[last_line_start..buf_end].trim();
+                    if self.options.profile.supports_psql_control_commands
+                        && is_ignorable_psql_control_command(last_line)
+                    {
+                        let before = self.buffer[..last_line_start].trim();
+                        if has_executable_sql_with_options(before, self.options) {
+                            statements.push(before.to_string());
+                        }
+                        self.buffer.clear();
+                        self.postgres_dollar_quoted_routine = false;
+                        self.previous = None;
+                        i += 1;
+                        continue;
+                    }
                     if self.options.profile.supports_slash_line_block_delimiter && last_line == "/" {
                         let before = self.buffer[..last_line_start].trim();
                         if has_executable_sql_with_options(before, self.options) {
@@ -556,7 +575,15 @@ impl SqlStatementSplitter {
         }
         let trimmed = self.buffer.trim();
         let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
-        if self.options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
+        if self.options.profile.supports_psql_control_commands && is_ignorable_psql_control_command(last_line) {
+            let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
+            if has_executable_sql_with_options(before, self.options) {
+                statements.push(before.to_string());
+            }
+            self.buffer.clear();
+        } else if self.options.profile.supports_custom_delimiter_commands
+            && parse_delimiter_command(last_line).is_some()
+        {
             let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
             if has_executable_sql_with_options(before, self.options) {
                 statements.push(before.to_string());
@@ -863,6 +890,13 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
             if ch == '\n' {
                 let line_start = sql[..i].rfind('\n').map_or(0, |pos| pos + 1);
                 let line = sql[line_start..i].trim();
+                if options.profile.supports_psql_control_commands && is_ignorable_psql_control_command(line) {
+                    push_statement_range(&mut ranges, sql, start, line_start, options);
+                    start = i + ch.len_utf8();
+                    postgres_dollar_quoted_routine = false;
+                    i = start;
+                    continue;
+                }
                 if options.profile.supports_slash_line_block_delimiter && line == "/" {
                     push_statement_range(&mut ranges, sql, start, line_start, options);
                     start = i + ch.len_utf8();
@@ -955,7 +989,11 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
 
     let trimmed = sql[start..].trim();
     let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
-    if options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
+    if options.profile.supports_psql_control_commands && is_ignorable_psql_control_command(last_line) {
+        if let Some(line_start) = sql[start..].rfind('\n').map(|pos| start + pos + 1) {
+            push_statement_range(&mut ranges, sql, start, line_start, options);
+        }
+    } else if options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
         if let Some(line_start) = sql[start..].rfind('\n').map(|pos| start + pos + 1) {
             push_statement_range(&mut ranges, sql, start, line_start, options);
         }
@@ -1415,6 +1453,37 @@ fn parse_delimiter_command(line: &str) -> Option<&str> {
         None
     };
     rest.map(|r| r.trim()).filter(|r| !r.is_empty())
+}
+
+fn is_ignorable_psql_control_command(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(command) = parts.next() else {
+        return false;
+    };
+
+    if command.eq_ignore_ascii_case("\\timing") {
+        return parts.next().is_none_or(|value| value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("off"))
+            && parts.next().is_none();
+    }
+
+    if !command.eq_ignore_ascii_case("\\set") {
+        return false;
+    }
+    let Some(variable) = parts.next() else {
+        return false;
+    };
+    let Some(value) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+
+    match variable.to_ascii_uppercase().as_str() {
+        "ON_ERROR_STOP" => matches!(value.to_ascii_lowercase().as_str(), "on" | "true" | "1"),
+        "VERBOSITY" => matches!(value.to_ascii_lowercase().as_str(), "default" | "verbose" | "terse" | "sqlstate"),
+        _ => false,
+    }
 }
 
 pub fn statement_summary(statement: &str) -> String {
@@ -3480,6 +3549,60 @@ END;";
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Dameng), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Gaussdb), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Xugu), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn gaussdb_split_ignores_psql_controls_before_anonymous_block_per_issue_6468() {
+        let block = "\
+/* 将逻辑放到匿名块中，便于捕获异常 pl/pgsql */
+DECLARE
+  v_date_str VARCHAR(20) := '20240824';
+  v_date_dt DATE := TO_DATE(v_date_str, 'YYYYMMDD');
+  v_eff_num NUMERIC := 0;
+  v_start_time TIMESTAMP := CURRENT_TIMESTAMP;
+  v_step TEXT := '';
+  v_job_name VARCHAR := 'F_XY_DG_IBDISCOUNT_DET';
+BEGIN
+  RAISE NOTICE 'issue 6468';
+END;";
+        let sql = format!("\\set ON_ERROR_STOP on\n\\set VERBOSITY verbose\n\\timing\n\n{block}\n/");
+
+        assert_eq!(split_sql_statements_for_database(&sql, DatabaseType::Gaussdb), vec![block]);
+
+        let cursor = sql[..sql.find("RAISE NOTICE").unwrap()].encode_utf16().count();
+        let executable_block = &block[block.find("DECLARE").unwrap()..];
+        assert_eq!(find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::Gaussdb), executable_block);
+    }
+
+    #[test]
+    fn gaussdb_streaming_split_ignores_chunked_psql_controls() {
+        let mut splitter =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Gaussdb));
+
+        assert!(splitter.push_chunk("\\set ON_ERROR_").is_empty());
+        assert!(splitter.push_chunk("STOP on\n\\tim").is_empty());
+        assert_eq!(
+            splitter.push_chunk("ing\nDECLARE\n  value NUMBER := 1;\nBEGIN\n  value := value + 1;\nEND;\n/\n"),
+            vec!["DECLARE\n  value NUMBER := 1;\nBEGIN\n  value := value + 1;\nEND;"]
+        );
+        assert!(splitter.finish().is_empty());
+    }
+
+    #[test]
+    fn gaussdb_split_does_not_ignore_psql_variable_assignment() {
+        let sql = "\\set tx_date 20240824\nDECLARE\n  value TEXT := '$tx_date';\nBEGIN\n  NULL;\nEND;\n/";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Gaussdb);
+        assert!(statements[0].starts_with("\\set tx_date 20240824"));
+    }
+
+    #[test]
+    fn gaussdb_ignores_only_safe_psql_controls() {
+        assert!(super::is_ignorable_psql_control_command("\\set ON_ERROR_STOP on"));
+        assert!(super::is_ignorable_psql_control_command("\\set VERBOSITY verbose"));
+        assert!(super::is_ignorable_psql_control_command("\\timing"));
+        assert!(!super::is_ignorable_psql_control_command("\\set ON_ERROR_STOP off"));
+        assert!(!super::is_ignorable_psql_control_command("\\set tx_date 20240824"));
     }
 
     #[test]
