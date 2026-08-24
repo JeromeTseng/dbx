@@ -6800,6 +6800,21 @@ async fn list_indexes_core_for_session(
                     drop(connections);
                     return external_driver_gaussdb_m_indexes(session, config.as_ref(), database, schema, table).await;
                 }
+                let config = config.clone();
+                let session = session.clone();
+                drop(connections);
+                return session
+                    .invoke_with_timeout::<Vec<db::IndexInfo>>(
+                        "listIndexes",
+                        serde_json::json!({
+                            "connection": config.as_ref(),
+                            "database": database,
+                            "schema": schema,
+                            "table": table,
+                        }),
+                        agent_metadata_timeout(Some(config.as_ref())),
+                    )
+                    .await;
             }
             if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
                 drop(connections);
