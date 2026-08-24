@@ -5190,7 +5190,8 @@ async function save() {
         .catch((e: any) => {
           const message = String(e?.message || e);
           if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-          if (config.one_time) void store.removeConnection(config.id);
+          // Keep failed one-time connections available for retry and error inspection.
+          // They are still removed by connectionStore.disconnect after a successful session.
           emit("connectFailed", appendConnectionErrorHints(config, mongodbAuthFailureHint(message), t));
         });
       return;
