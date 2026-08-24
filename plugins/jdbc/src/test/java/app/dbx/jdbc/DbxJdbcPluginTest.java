@@ -2653,6 +2653,35 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listIndexesDegradesToEmptyWhenDriverRejectsIndexMetadata() throws Exception {
+        for (Throwable failure : List.of(
+            new SQLFeatureNotSupportedException("indexes not supported"),
+            new UnsupportedOperationException("unsupported"),
+            new AbstractMethodError("unsupported")
+        )) {
+            String connection = """
+                { "connection_string": "jdbc:dbx-index-metadata:%s" }
+                """.formatted(failure.getClass().getSimpleName());
+            Driver driver = testDriver("jdbc:dbx-index-metadata:", indexMetadataConnection(failure));
+            DriverManager.registerDriver(driver);
+            try {
+                JsonNode response = request("listIndexes", """
+                    {
+                      "connection": %s,
+                      "schema": "PUBLIC",
+                      "table": "SOME_TABLE"
+                    }
+                    """.formatted(connection));
+
+                assertFalse(response.has("error"), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals(0, response.path("result").size(), failure.getClass().getSimpleName() + ": " + response);
+            } finally {
+                closeAndDeregister(connection, driver);
+            }
+        }
+    }
+
+    @Test
     void oracleEffectiveSchemaUsesExactOwnerBeforeUppercaseFallback() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleEffectiveSchema", Connection.class, String.class);
         method.setAccessible(true);
@@ -3389,6 +3418,29 @@ final class DbxJdbcPluginTest {
                 case "getMinorVersion" -> 0;
                 case "jdbcCompliant" -> false;
                 case "getParentLogger" -> java.util.logging.Logger.getGlobal();
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Connection indexMetadataConnection(Throwable failure) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getPrimaryKeys".equals(method.getName()) || "getIndexInfo".equals(method.getName())) {
+                    throw failure;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "close" -> null;
                 default -> defaultValue(method.getReturnType());
             }
         );

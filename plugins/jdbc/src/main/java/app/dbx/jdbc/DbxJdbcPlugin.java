@@ -2120,16 +2120,22 @@ public final class DbxJdbcPlugin {
                     primaryColumnsBySequence.put((int) rs.getShort("KEY_SEQ"), column);
                 }
             }
-        } catch (SQLException | UnsupportedOperationException ignored) {
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
 
+        // Presto/Trino JDBC throws SQLFeatureNotSupportedException from getIndexInfo, and
+        // drivers compiled before JDBC 4 surface unimplemented DatabaseMetaData methods as
+        // AbstractMethodError. Both must degrade to an empty list, matching the metadata
+        // error tolerance used by the other DatabaseMetaData readers in this plugin.
         LinkedHashMap<String, ObjectNode> indexes = new LinkedHashMap<>();
         try (ResultSet rs = meta.getIndexInfo(catalog, schemaPattern, table, false, false)) {
             appendJdbcIndexes(indexes, primaryIndexNames, rs);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
         if (indexes.isEmpty() && catalog != null) {
             try (ResultSet rs = meta.getIndexInfo(null, schemaPattern, table, false, false)) {
                 appendJdbcIndexes(indexes, primaryIndexNames, rs);
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
         }
         markPrimaryIndexByColumns(indexes.values(), new ArrayList<>(primaryColumnsBySequence.values()));
