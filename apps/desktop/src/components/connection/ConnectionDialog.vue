@@ -2630,7 +2630,11 @@ const selectedSshLayer = computed(() => (selectedTransportLayer.value?.type === 
 const selectedProxyLayer = computed(() => (selectedTransportLayer.value?.type === "proxy" ? selectedTransportLayer.value : null));
 const selectedHttpTunnelLayer = computed(() => (selectedTransportLayer.value?.type === "http_tunnel" ? selectedTransportLayer.value : null));
 
-const tunnelProfiles = computed(() => tunnelProfileStore.profiles);
+const tunnelProfiles = computed(() => {
+  const profiles = tunnelProfileStore.profiles;
+  if (!sqliteSshOnlyTransport.value) return profiles;
+  return profiles.filter((profile) => profile.type === "ssh");
+});
 const selectedLayerProfileId = computed(() => selectedTransportLayer.value?.profile_id || "");
 const selectedLayerProfile = computed(() => tunnelProfileStore.profileById(selectedLayerProfileId.value));
 
@@ -3050,7 +3054,36 @@ const zookeeperAuthScheme = computed<ZooKeeperAuthScheme>({
     resetTestState();
   },
 });
-const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isCloudflareD1Connection(form.value) && !isH2FileMode.value && !(form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns"));
+const canUseTransportLayers = computed(() => {
+  if (form.value.db_type === "access" || isCloudflareD1Connection(form.value) || isH2FileMode.value || (form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns")) {
+    return false;
+  }
+  if (form.value.db_type === "sqlite") {
+    return isDesktop;
+  }
+  return true;
+});
+const sqliteSshOnlyTransport = computed(() => form.value.db_type === "sqlite");
+const sqliteUsesSsh = computed(() => form.value.db_type === "sqlite" && (form.value.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh"));
+const sqliteWorkerPlacement = computed({
+  get: () => getUrlParam(form.value.url_params, "dbx_sqlite_worker") || "session",
+  set: (value: string) => {
+    const next = value === "session" ? "" : value;
+    form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker", next);
+    if (value !== "preplaced" && !getUrlParam(form.value.url_params, "dbx_sqlite_worker_path")) {
+      return;
+    }
+    if (value === "session") {
+      form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker_path", "");
+    }
+  },
+});
+const sqliteWorkerPath = computed({
+  get: () => getUrlParam(form.value.url_params, "dbx_sqlite_worker_path"),
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker_path", value);
+  },
+});
 const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile));
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", driver: agentDriverInstallKey(form.value.db_type, form.value.driver_profile) }));
@@ -4971,6 +5004,15 @@ watch(canUseTransportLayers, (value) => {
   }
 });
 
+watch(sqliteSshOnlyTransport, (sshOnly) => {
+  if (!sshOnly) return;
+  const layers = form.value.transport_layers || [];
+  const next = layers.filter((layer) => layer.type === "ssh");
+  if (next.length === layers.length) return;
+  form.value.transport_layers = next;
+  selectedTransportLayerId.value = next[0]?.id || null;
+});
+
 watch(supportsTlsToggle, (value) => {
   if (!value && configTab.value === "tls") {
     configTab.value = "connection";
@@ -4992,6 +5034,7 @@ function addSshTunnel() {
 }
 
 function addProxyTunnel() {
+  if (sqliteSshOnlyTransport.value) return;
   const next: TransportLayerConfig = { type: "proxy", ...defaultProxyTunnel() };
   next.name = `Proxy ${transportLayers.value.length + 1}`;
   form.value.transport_layers = [...transportLayers.value, next];
@@ -5000,6 +5043,7 @@ function addProxyTunnel() {
 }
 
 function addHttpTunnel() {
+  if (sqliteSshOnlyTransport.value) return;
   const next: TransportLayerConfig = { type: "http_tunnel", ...defaultHttpTunnel() };
   next.name = t("connection.httpTunnelDefaultName", { index: 1 });
   form.value.transport_layers = [next, ...transportLayers.value];
@@ -5008,6 +5052,7 @@ function addHttpTunnel() {
 }
 
 function duplicateTransportLayer(layer: TransportLayerConfig) {
+  if (sqliteSshOnlyTransport.value && layer.type !== "ssh") return;
   const next = normalizeTransportLayer({ ...layer, id: uuid(), name: layer.name ? `${layer.name} copy` : "" });
   form.value.transport_layers = [...transportLayers.value, next];
   selectedTransportLayerId.value = next.id;
@@ -5047,6 +5092,7 @@ function dropTransportLayer(targetId: string) {
 function changeSelectedTransportLayerType(type: "ssh" | "proxy" | "http_tunnel") {
   const selected = selectedTransportLayer.value;
   if (!selected || selected.type === type) return;
+  if (sqliteSshOnlyTransport.value && type !== "ssh") return;
   const replacement: TransportLayerConfig =
     type === "proxy" ? { type: "proxy", ...defaultProxyTunnel(), id: selected.id, name: selected.name } : type === "http_tunnel" ? { type: "http_tunnel", ...defaultHttpTunnel(), id: selected.id, name: selected.name } : { type: "ssh", ...defaultSshTunnel(), id: selected.id, name: selected.name };
   form.value.transport_layers = transportLayers.value.map((layer) => (layer.id === selected.id ? replacement : layer));
@@ -5069,6 +5115,9 @@ function updateSelectedSshAuthMethod(value: unknown) {
 
 function validateTransportLayers(config: LegacyConnectionConfig) {
   const layers = config.transport_layers || [];
+  if (config.db_type === "sqlite" && layers.some((layer) => layer.enabled !== false && layer.type !== "ssh")) {
+    throw new Error(t("connection.sqliteTransportSshOnly"));
+  }
   layers.forEach((layer, index) => {
     if (layer.enabled === false) return;
     // Profile-referencing layers are stubs: the shared profile supplies the
@@ -6019,10 +6068,10 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelClass">{{ t("connection.filePath") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <div class="flex items-center gap-1">
-                        <Input v-model="form.host" class="flex-1" :placeholder="filePathPlaceholder" />
+                        <Input v-model="form.host" class="flex-1" :placeholder="sqliteUsesSsh ? t('connection.sqliteRemotePathPlaceholder') : filePathPlaceholder" />
                         <Tooltip v-if="isDesktop">
                           <TooltipTrigger as-child>
-                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseDbFilePath">
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="sqliteUsesSsh" @click="browseDbFilePath">
                               <FolderOpen class="h-4 w-4" />
                             </Button>
                           </TooltipTrigger>
@@ -6038,23 +6087,45 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                         <Tooltip v-if="isDesktop && form.db_type === 'sqlite'">
                           <TooltipTrigger as-child>
-                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="createSqliteFilePath">
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="sqliteUsesSsh" @click="createSqliteFilePath">
                               <FilePlus2 class="h-4 w-4" />
                             </Button>
                           </TooltipTrigger>
                           <TooltipContent>{{ t("connection.createSqliteFile") }}</TooltipContent>
                         </Tooltip>
                       </div>
-                      <p v-if="supportsMemoryDatabasePath" class="text-xs text-muted-foreground">
+                      <p v-if="sqliteUsesSsh" class="text-xs text-muted-foreground">
+                        {{ t("connection.sqliteRemotePathHint") }}
+                      </p>
+                      <p v-else-if="supportsMemoryDatabasePath" class="text-xs text-muted-foreground">
                         {{ t("connection.memoryDatabasePathHint") }}
                       </p>
                     </div>
                   </div>
-                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type === 'sqlite' && sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.sqliteWorkerPlacement") }}</Label>
+                    <div class="col-span-3 space-y-2">
+                      <label class="flex items-start gap-2 text-sm">
+                        <input type="radio" class="mt-1" value="session" v-model="sqliteWorkerPlacement" />
+                        <span>{{ t("connection.sqliteWorkerPlacementSession") }}</span>
+                      </label>
+                      <label class="flex items-start gap-2 text-sm">
+                        <input type="radio" class="mt-1" value="persist" v-model="sqliteWorkerPlacement" />
+                        <span>{{ t("connection.sqliteWorkerPlacementPersist") }}</span>
+                      </label>
+                      <label class="flex items-start gap-2 text-sm">
+                        <input type="radio" class="mt-1" value="preplaced" v-model="sqliteWorkerPlacement" />
+                        <span>{{ t("connection.sqliteWorkerPlacementPreplaced") }}</span>
+                      </label>
+                      <Input v-if="sqliteWorkerPlacement !== 'session'" v-model="sqliteWorkerPath" :placeholder="sqliteWorkerPlacement === 'persist' ? t('connection.sqliteWorkerPersistPathPlaceholder') : t('connection.sqliteWorkerPreplacedPathPlaceholder')" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.sqliteWorkerPlacementHint") }}</p>
+                    </div>
+                  </div>
+                  <div v-if="form.db_type === 'sqlite' && !sqliteUsesSsh" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.sqliteCipherKey") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.sqliteCipherKeyPlaceholder')" />
                   </div>
-                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-start gap-4">
+                  <div v-if="form.db_type === 'sqlite' && !sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelTopClass">{{ t("connection.sqliteExtensions") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <div class="flex items-start gap-1">
@@ -8282,11 +8353,11 @@ function openExternalUrl(url: string) {
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.sshHopAdd") }}
                       </Button>
-                      <Button type="button" variant="outline" size="sm" @click="addProxyTunnel">
+                      <Button v-if="!sqliteSshOnlyTransport" type="button" variant="outline" size="sm" @click="addProxyTunnel">
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.proxy") }}
                       </Button>
-                      <Button type="button" variant="outline" size="sm" @click="addHttpTunnel">
+                      <Button v-if="!sqliteSshOnlyTransport" type="button" variant="outline" size="sm" @click="addHttpTunnel">
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.httpTunnelAdd") }}
                       </Button>
@@ -8335,7 +8406,7 @@ function openExternalUrl(url: string) {
                       <span v-else class="text-red-500">{{ t("connection.tunnelProfileMissing") }}</span>
                     </div>
                   </div>
-                  <div v-if="!selectedLayerProfileId" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="!selectedLayerProfileId && !sqliteSshOnlyTransport" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">Type</Label>
                     <Select :model-value="selectedTransportLayer.type" @update:model-value="(value: any) => changeSelectedTransportLayerType(value)">
                       <SelectTrigger class="col-span-3 h-9">

@@ -422,6 +422,7 @@ const {
   revealDatabaseFile,
   canBackupSqliteDatabase,
   backupSqliteDatabase,
+  restoreSqliteDatabase,
   disconnectConnection,
   connectionDisconnectMenuLabel,
   canDisconnectConnection,
@@ -4942,11 +4943,20 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       });
     }
     if (canBackupSqliteDatabase.value) {
+      const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+      const usesSsh = (config?.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
       items.push({
         label: t("contextMenu.backupSqliteDatabase"),
         action: backupSqliteDatabase,
         icon: HardDriveDownload,
       });
+      if (usesSsh) {
+        items.push({
+          label: t("contextMenu.restoreSqliteDatabase"),
+          action: restoreSqliteDatabase,
+          icon: HardDriveDownload,
+        });
+      }
     }
     items.push({ label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
