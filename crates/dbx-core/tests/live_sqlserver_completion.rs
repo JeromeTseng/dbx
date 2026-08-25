@@ -1006,6 +1006,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
