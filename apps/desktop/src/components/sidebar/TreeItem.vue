@@ -1380,7 +1380,7 @@ function onKeydown(event: KeyboardEvent) {
     </LightTooltip>
   </div>
 
-  <div v-else @contextmenu="onTreeItemContextMenu">
+  <div v-else :class="{ 'sidebar-tree-item--sticky': stickyHeader }" @contextmenu="onTreeItemContextMenu">
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
@@ -1399,7 +1399,6 @@ function onKeydown(event: KeyboardEvent) {
             'tree-item-active': selectionVisual.rowSelected,
             'tree-item-active--selection-set': selectionVisual.usesSelectionSetHighlight && selectionVisual.rowSelected,
             'tree-item-highlight': highlighted,
-            'sidebar-tree-item--sticky': stickyHeader,
           },
         ]"
         :tabindex="selectionVisual.selected || selectionVisual.multiSelected ? 0 : -1"
@@ -1635,7 +1634,6 @@ function onKeydown(event: KeyboardEvent) {
   top: 0;
   z-index: 2;
   background-color: var(--background);
-  border-bottom: 1px solid var(--border);
 }
 
 .tree-item-connection-tint:hover::before {

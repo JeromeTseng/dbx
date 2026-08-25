@@ -3,7 +3,7 @@ import type { SqlSemanticSpan, SqlSemanticToken } from "@/lib/sql/semantic/types
 const WORD_START = /[A-Za-z_@$#]/;
 const WORD_PART = /[A-Za-z0-9_@$#]/;
 
-function token(kind: SqlSemanticToken["kind"], text: string, start: number, end: number, depth: number, quote?: string): SqlSemanticToken {
+function token(kind: SqlSemanticToken["kind"], text: string, start: number, end: number, depth: number, quote?: string, closed?: boolean): SqlSemanticToken {
   return {
     kind,
     text,
@@ -11,10 +11,11 @@ function token(kind: SqlSemanticToken["kind"], text: string, start: number, end:
     span: { start, end },
     depth,
     quote,
+    ...(closed === undefined ? {} : { closed }),
   };
 }
 
-function readQuoted(input: string, start: number, open: string, close: string): number {
+function readQuoted(input: string, start: number, open: string, close: string): { end: number; closed: boolean } {
   let index = start + open.length;
   while (index < input.length) {
     if (input.startsWith(close, index)) {
@@ -22,11 +23,11 @@ function readQuoted(input: string, start: number, open: string, close: string): 
         index += close.length * 2;
         continue;
       }
-      return index + close.length;
+      return { end: index + close.length, closed: true };
     }
     index += 1;
   }
-  return input.length;
+  return { end: input.length, closed: false };
 }
 
 const DOLLAR_QUOTE_TAG_PATTERN = /\$[A-Za-z_0-9]*\$/y;
@@ -86,8 +87,9 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSema
     }
 
     if (ch === "'") {
-      index = readQuoted(input, start, "'", "'");
-      tokens.push(token("string", input.slice(start, index), start, index, depth, "'"));
+      const quoted = readQuoted(input, start, "'", "'");
+      index = quoted.end;
+      tokens.push(token("string", input.slice(start, index), start, index, depth, "'", quoted.closed));
       continue;
     }
 
@@ -96,26 +98,29 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSema
       if (marker) {
         const closing = input.indexOf(marker, start + marker.length);
         index = closing < 0 ? input.length : closing + marker.length;
-        tokens.push(token("string", input.slice(start, index), start, index, depth, marker));
+        tokens.push(token("string", input.slice(start, index), start, index, depth, marker, closing >= 0));
         continue;
       }
     }
 
     if (ch === '"') {
-      index = readQuoted(input, start, '"', '"');
-      tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, '"'));
+      const quoted = readQuoted(input, start, '"', '"');
+      index = quoted.end;
+      tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, '"', quoted.closed));
       continue;
     }
 
     if (ch === "`") {
-      index = readQuoted(input, start, "`", "`");
-      tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, "`"));
+      const quoted = readQuoted(input, start, "`", "`");
+      index = quoted.end;
+      tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, "`", quoted.closed));
       continue;
     }
 
     if (ch === "[") {
-      index = readQuoted(input, start, "[", "]");
-      tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, "["));
+      const quoted = readQuoted(input, start, "[", "]");
+      index = quoted.end;
+      tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, "[", quoted.closed));
       continue;
     }
 

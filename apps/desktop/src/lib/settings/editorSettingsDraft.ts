@@ -44,6 +44,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridFilterEditorView",
   "dataGridTextFilterPanelHeight",
   "dataGridAutoTransposeSingleRow",
+  "dataGridCellDetailButtonVisible",
   "pageSize",
   "tableOpenPageSize",
   "queryResultMaxRowsEnabled",

@@ -149,6 +149,8 @@ pub enum DataGridContextFilterMode {
     NotEquals,
     IsNull,
     IsNotNull,
+    IsBlank,
+    IsNotBlank,
     Like,
     NotLike,
     LessThan,
@@ -546,6 +548,18 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
     match options.mode {
         DataGridContextFilterMode::IsNull => Some(format!("{column} IS NULL")),
         DataGridContextFilterMode::IsNotNull => Some(format!("{column} IS NOT NULL")),
+        DataGridContextFilterMode::IsBlank
+            if matches!(options.database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) =>
+        {
+            Some(format!("{column} IS NULL"))
+        }
+        DataGridContextFilterMode::IsNotBlank
+            if matches!(options.database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) =>
+        {
+            Some(format!("{column} IS NOT NULL"))
+        }
+        DataGridContextFilterMode::IsBlank => Some(format!("({column} IS NULL OR {column} = '')")),
+        DataGridContextFilterMode::IsNotBlank => Some(format!("({column} IS NOT NULL AND {column} <> '')")),
         DataGridContextFilterMode::Equals if value.is_null() => Some(format!("{column} IS NULL")),
         DataGridContextFilterMode::NotEquals if value.is_null() => Some(format!("{column} IS NOT NULL")),
         DataGridContextFilterMode::Like => Some(format!(
@@ -4153,6 +4167,73 @@ mod tests {
     }
 
     #[test]
+    fn builds_blank_and_nonblank_context_filter_conditions() {
+        let build = |database_type: DatabaseType,
+                     mode: DataGridContextFilterMode,
+                     identifier_quote: Option<&str>,
+                     column_name: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(database_type),
+                identifier_quote: identifier_quote.map(str::to_string),
+                column_name: column_name.to_string(),
+                mode,
+                value: Value::Null,
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column(column_name, "varchar", true, None)),
+            })
+        };
+
+        assert_eq!(
+            build(DatabaseType::Mysql, DataGridContextFilterMode::IsBlank, None, "status"),
+            Some("(`status` IS NULL OR `status` = '')".to_string())
+        );
+        assert_eq!(
+            build(DatabaseType::Mysql, DataGridContextFilterMode::IsNotBlank, None, "status"),
+            Some("(`status` IS NOT NULL AND `status` <> '')".to_string())
+        );
+        assert_eq!(
+            build(DatabaseType::Mysql, DataGridContextFilterMode::IsNull, None, "status"),
+            Some("`status` IS NULL".to_string())
+        );
+        assert_eq!(
+            build(DatabaseType::Mysql, DataGridContextFilterMode::IsNotNull, None, "status"),
+            Some("`status` IS NOT NULL".to_string())
+        );
+        assert_eq!(
+            build(DatabaseType::Kingbase, DataGridContextFilterMode::IsBlank, Some("`"), "order detail"),
+            Some("(`order detail` IS NULL OR `order detail` = '')".to_string())
+        );
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(
+                build(database_type, DataGridContextFilterMode::IsBlank, None, "STATUS"),
+                Some("\"STATUS\" IS NULL".to_string())
+            );
+            assert_eq!(
+                build(database_type, DataGridContextFilterMode::IsNotBlank, None, "STATUS"),
+                Some("\"STATUS\" IS NOT NULL".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_context_filter_mode_serialization_stable() {
+        assert_eq!(serde_json::to_string(&DataGridContextFilterMode::IsNull).unwrap(), "\"is-null\"");
+        assert_eq!(serde_json::to_string(&DataGridContextFilterMode::IsNotNull).unwrap(), "\"is-not-null\"");
+        assert!(matches!(
+            serde_json::from_str::<DataGridContextFilterMode>("\"is-null\"").unwrap(),
+            DataGridContextFilterMode::IsNull
+        ));
+        assert!(matches!(
+            serde_json::from_str::<DataGridContextFilterMode>("\"is-not-null\"").unwrap(),
+            DataGridContextFilterMode::IsNotNull
+        ));
+        assert_eq!(serde_json::to_string(&DataGridContextFilterMode::IsBlank).unwrap(), "\"is-blank\"");
+        assert_eq!(serde_json::to_string(&DataGridContextFilterMode::IsNotBlank).unwrap(), "\"is-not-blank\"");
+    }
+
+    #[test]
     fn builds_oracle_synthetic_rowid_context_filter_conditions() {
         let equals = |database_type, column_name: &str, value| {
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -4405,6 +4486,8 @@ mod tests {
             DataGridContextFilterMode::Like,
             DataGridContextFilterMode::GreaterThan,
             DataGridContextFilterMode::IsNull,
+            DataGridContextFilterMode::IsBlank,
+            DataGridContextFilterMode::IsNotBlank,
             DataGridContextFilterMode::In,
             DataGridContextFilterMode::Between,
         ] {

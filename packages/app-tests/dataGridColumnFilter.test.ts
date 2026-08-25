@@ -136,6 +136,7 @@ test("hides list and range modes for unsupported dialects", () => {
   }
   assert.equal(filterModeIsSupportedForDatabase("between", "postgres"), true);
   assert.equal(filterModeIsSupportedForDatabase("is-null", "influxdb"), true);
+  assert.equal(filterModeIsSupportedForDatabase("is-blank", "influxdb"), true);
 });
 
 test("requires usable values for structured list and range filters", () => {
@@ -144,6 +145,27 @@ test("requires usable values for structured list and range filters", () => {
   assert.equal(filterModeHasCompleteValue("between", "10", ""), false);
   assert.equal(filterModeHasCompleteValue("not-between", "10", "20"), true);
   assert.equal(filterModeHasCompleteValue("is-null", "", ""), true);
+  assert.equal(filterModeHasCompleteValue("is-not-null", "", ""), true);
+  assert.equal(filterModeHasCompleteValue("is-blank", "", ""), true);
+  assert.equal(filterModeHasCompleteValue("is-not-blank", "", ""), true);
+});
+
+test("passes value-less blank modes through the shared context filter API", async () => {
+  installFilterFetchMock();
+  for (const mode of ["is-blank", "is-not-blank"] as const) {
+    await buildDataGridContextFilterCondition({
+      databaseType: "mysql",
+      columnName: "status",
+      mode,
+      value: null,
+    });
+    assert.deepEqual(lastContextFilterOptions, {
+      databaseType: "mysql",
+      columnName: "status",
+      mode,
+      value: null,
+    });
+  }
 });
 
 test("passes list and range values through the shared context filter API", async () => {

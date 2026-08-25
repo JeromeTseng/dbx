@@ -1018,6 +1018,8 @@ export interface TableStructureEditorDraft {
   newTableName: string;
   tableComment: string;
   originalTableComment: string;
+  mysqlAutoIncrementValue?: string;
+  originalMysqlAutoIncrementValue?: string;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];

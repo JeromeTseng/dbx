@@ -1,3 +1,13 @@
+export interface QueryEditorViewportRange {
+  from: number;
+  to: number;
+}
+
+export function isQueryEditorPositionVisible(position: number, visibleRanges: readonly QueryEditorViewportRange[] | undefined, viewport: QueryEditorViewportRange): boolean {
+  const ranges = visibleRanges && visibleRanges.length > 0 ? visibleRanges : [viewport];
+  return ranges.some((range) => position >= range.from && position <= range.to);
+}
+
 export function createQueryEditorExecutionViewportOwnership() {
   let nextRequestId = 0;
   let pendingRequestId: number | undefined;

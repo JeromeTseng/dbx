@@ -4753,6 +4753,20 @@ pub async fn stream_rows_in_manual_transaction<F>(
     txn_session_id: &str,
     sql: &str,
     batch_size: usize,
+    on_batch: F,
+) -> Result<u64, String>
+where
+    F: FnMut(Vec<Vec<serde_json::Value>>) -> Result<(), String> + Send,
+{
+    stream_rows_in_manual_transaction_with_cancel(state, txn_session_id, sql, batch_size, None, on_batch).await
+}
+
+pub(crate) async fn stream_rows_in_manual_transaction_with_cancel<F>(
+    state: &AppState,
+    txn_session_id: &str,
+    sql: &str,
+    batch_size: usize,
+    cancel_token: Option<CancellationToken>,
     mut on_batch: F,
 ) -> Result<u64, String>
 where
@@ -4782,30 +4796,46 @@ where
         return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
 
-    let connection = {
+    let (connection, pool_key, connection_id) = {
         let sessions = state.transaction_sessions.read().await;
         sessions
             .get(txn_session_id)
-            .map(|session| Arc::clone(&session.connection))
+            .map(|session| (Arc::clone(&session.connection), session.pool_key.clone(), session.connection_id.clone()))
             .ok_or(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR)?
     };
+    let operation_budget = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&connection_id)
+            .map(DbOperationBudget::from_connection_config)
+            .unwrap_or_else(DbOperationBudget::with_defaults)
+    };
+    let postgres_cancel_context = state.get_postgres_cancel_context(&pool_key).await;
     let batch_size = batch_size.max(1);
     let mut conn = connection.lock().await;
     let stream_result = match &mut *conn {
         TxnConnection::Postgres(conn) => {
             let mut batch = Vec::with_capacity(batch_size);
             let mut total_rows = 0_u64;
-            let result = db::postgres::stream_select_query_inner_unnamed(conn, sql, None, &mut |item| {
-                if let db::postgres::PostgresQueryStreamItem::Row(row) = item {
-                    batch.push(row);
-                    total_rows += 1;
-                    if batch.len() >= batch_size {
-                        on_batch(std::mem::take(&mut batch))?;
-                        batch = Vec::with_capacity(batch_size);
+            let result = db::postgres::stream_select_query_inner_unnamed_with_cancel(
+                conn,
+                sql,
+                None,
+                &mut |item| {
+                    if let db::postgres::PostgresQueryStreamItem::Row(row) = item {
+                        batch.push(row);
+                        total_rows += 1;
+                        if batch.len() >= batch_size {
+                            on_batch(std::mem::take(&mut batch))?;
+                            batch = Vec::with_capacity(batch_size);
+                        }
                     }
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+                cancel_token.as_ref(),
+                &operation_budget,
+                postgres_cancel_context.as_ref(),
+            )
             .await;
             match result {
                 Ok(_) if !batch.is_empty() => on_batch(batch).map(|_| total_rows),
@@ -4866,8 +4896,13 @@ where
             sessions.remove(txn_session_id)
         };
         if let Some(session) = removed {
-            let _ = rollback_manual_txn_connection(&mut conn).await;
+            let rollback_result =
+                rollback_manual_txn_connection_with_postgres_timeout(&mut conn, Some(operation_budget.cleanup_timeout))
+                    .await;
             release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
+            if let Err(rollback_error) = rollback_result {
+                return Err(format!("{err}. Transaction cleanup failed: {rollback_error}"));
+            }
         }
         return Err(format!("{err}. Transaction was auto-rolled back."));
     }
@@ -4890,9 +4925,22 @@ where
 }
 
 async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), String> {
+    rollback_manual_txn_connection_with_postgres_timeout(conn, None).await
+}
+
+async fn rollback_manual_txn_connection_with_postgres_timeout(
+    conn: &mut TxnConnection,
+    postgres_timeout: Option<Duration>,
+) -> Result<(), String> {
     match conn {
         TxnConnection::Postgres(conn) => {
-            conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            if let Some(timeout) = postgres_timeout {
+                db::postgres::execute_postgres_infra_statement(conn, "ROLLBACK", timeout, "manual_txn.rollback")
+                    .await
+                    .map_err(|error| format!("ROLLBACK failed: {error}"))?;
+            } else {
+                conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            }
         }
         TxnConnection::Mysql(conn) => {
             conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;

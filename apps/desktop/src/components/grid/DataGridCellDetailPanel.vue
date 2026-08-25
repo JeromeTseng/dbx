@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, toRef } from "vue";
-import { Code2, Copy, Download, Eye, FileUp, Pencil, X } from "@lucide/vue";
+import { Code2, Copy, Download, Eye, FileDiff, FileUp, Pencil, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -28,6 +28,8 @@ const props = defineProps<{
   sideJsonView: boolean;
   showCompactJson: boolean;
   canCompactJson: boolean;
+  showCompareJson?: boolean;
+  canCompareJson?: boolean;
   typeColorClass: (type: string) => string;
   canDownloadBinaryValue: (detail: DataGridCellDetail | null) => boolean;
   downloadBinaryValue: (detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) => void | Promise<void>;
@@ -44,6 +46,7 @@ const detailEditValue = defineModel<string>("value", { default: "" });
 const emit = defineEmits<{
   startEdit: [];
   compactJson: [];
+  compareJson: [];
   toggleFormatted: [];
   copyValue: [];
   commit: [];
@@ -138,6 +141,7 @@ defineExpose({ openSearch });
         <div class="flex min-h-5 items-center justify-between gap-2">
           <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
           <div class="flex items-center gap-1">
+            <Button v-if="editing && showCompareJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompareJson" :title="t('grid.compareJson')" @mousedown.prevent @click="emit('compareJson')"><FileDiff class="h-3 w-3" />{{ t("grid.compareJson") }}</Button>
             <Button v-if="showCompactJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompactJson" :title="t('grid.compactJson')" @click="emit('compactJson')"><Code2 class="h-3 w-3" />{{ t("grid.compactJson") }}</Button>
             <Button v-if="!editing && detail.formattedJson" :variant="sideJsonView ? 'secondary' : 'ghost'" size="sm" class="h-5 gap-1 px-1.5 text-xs" :title="t('grid.formattedJson')" @click="emit('toggleFormatted')"><Code2 class="h-3 w-3" />{{ t("grid.formattedJson") }}</Button>
             <Button v-if="!editing && detail.isEditable" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.editValue')" @click="emit('startEdit')"><Pencil class="h-3 w-3" /></Button>

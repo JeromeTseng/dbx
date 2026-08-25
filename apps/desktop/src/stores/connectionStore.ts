@@ -824,7 +824,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
     for (const connectionId of connectionIds) {
-      queryStore.closeConnectionTabs(connectionId);
+      queryStore.closeConnectionTabs(connectionId, { force: true });
     }
   }
 

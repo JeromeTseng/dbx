@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -702,25 +703,27 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mousemove="handleTabDragTarget($event, tab)"
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
-                    <span class="shrink-0" :class="tabIconClass(tab)">
-                      <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
-                      <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
-                      <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
-                      <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
-                      <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
-                      <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
-                      <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
-                      <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                      <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                      <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                      <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
-                      <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
-                      <Code2 v-else class="h-3.5 w-3.5" />
-                    </span>
+                    <TabExecutionStatus :tab="tab">
+                      <span class="shrink-0" :class="tabIconClass(tab)">
+                        <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
+                        <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
+                        <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
+                        <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
+                        <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
+                        <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
+                        <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
+                        <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
+                        <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
+                        <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
+                        <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
+                        <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
+                        <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
+                        <Code2 v-else class="h-3.5 w-3.5" />
+                      </span>
+                    </TabExecutionStatus>
                     <input
                       v-if="editingTabId === tab.id"
                       v-model="editingTitle"
@@ -841,8 +844,10 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                   @contextmenu="onContextMenu"
                   @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
                 >
-                  <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
-                  <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  <TabExecutionStatus :tab="tab">
+                    <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
+                    <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  </TabExecutionStatus>
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                     <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
@@ -908,25 +913,27 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mousemove="handleTabDragTarget($event, tab)"
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
-                    <span class="shrink-0" :class="tabIconClass(tab)">
-                      <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
-                      <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
-                      <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
-                      <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
-                      <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
-                      <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
-                      <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
-                      <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                      <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                      <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                      <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
-                      <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
-                      <Code2 v-else class="h-3.5 w-3.5" />
-                    </span>
+                    <TabExecutionStatus :tab="tab">
+                      <span class="shrink-0" :class="tabIconClass(tab)">
+                        <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
+                        <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
+                        <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
+                        <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
+                        <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
+                        <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
+                        <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
+                        <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
+                        <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
+                        <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
+                        <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
+                        <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
+                        <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
+                        <Code2 v-else class="h-3.5 w-3.5" />
+                      </span>
+                    </TabExecutionStatus>
                     <input
                       v-if="editingTabId === tab.id"
                       v-model="editingTitle"
@@ -993,8 +1000,10 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                   @contextmenu="onContextMenu"
                   @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
                 >
-                  <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
-                  <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  <TabExecutionStatus :tab="tab">
+                    <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
+                    <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  </TabExecutionStatus>
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                     <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>

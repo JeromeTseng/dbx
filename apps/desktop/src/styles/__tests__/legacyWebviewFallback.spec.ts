@@ -81,10 +81,11 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps the data transfer dialog width fallback scoped to legacy WebViews", () => {
-    expect(dataTransferDialogSource).toContain('class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden"');
+    expect(dataTransferDialogSource).toContain('class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden resize"');
+    expect(dataTransferDialogSource).toContain('width: "min(1120px, calc(100vw - 2rem))"');
     expect(dataTransferDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"]');
-    expect(dataTransferDialogSource).toContain("width: calc(100vw - 2rem) !important;");
-    expect(dataTransferDialogSource).toContain("max-width: 1120px !important;");
+    expect(dataTransferDialogSource).toContain("max-width: calc(100vw - 2rem) !important;");
+    expect(dataTransferDialogSource).not.toMatch(/^\s+width: calc\(100vw - 2rem\) !important;$/m);
     expect(globalsCss).not.toContain(".dbx-transfer-dialog");
   });
 

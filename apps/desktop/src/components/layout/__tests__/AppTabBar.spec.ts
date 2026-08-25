@@ -119,3 +119,11 @@ describe("AppTabBar overflow search", () => {
     expect(tabBarSource).toContain('[data-tab-search-input="fixed"]');
   });
 });
+
+describe("AppTabBar query execution status", () => {
+  it("replaces the icon through one shared status component in every tab surface", () => {
+    expect(tabBarSource).toContain('import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";');
+    expect(tabBarSource.match(/<TabExecutionStatus :tab="tab">/g)).toHaveLength(4);
+    expect(tabBarSource.match(/<\/TabExecutionStatus>/g)).toHaveLength(4);
+  });
+});

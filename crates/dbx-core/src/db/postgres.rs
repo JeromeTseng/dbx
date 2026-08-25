@@ -1745,6 +1745,7 @@ async fn stream_select_query_text(
     Ok(rows_streamed)
 }
 
+#[cfg(test)]
 pub(crate) async fn stream_select_query_inner_unnamed(
     client: &deadpool_postgres::Client,
     sql: &str,
@@ -1752,6 +1753,57 @@ pub(crate) async fn stream_select_query_inner_unnamed(
     on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     stream_select_query_inner_with_mode(client, sql, row_limit, on_item, true).await
+}
+
+pub(crate) async fn stream_select_query_inner_unnamed_with_cancel(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    row_limit: Option<usize>,
+    on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
+    cancel_token: Option<&CancellationToken>,
+    budget: &DbOperationBudget,
+    cancel_context: Option<&PostgresCancelContext>,
+) -> Result<u64, String> {
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(crate::query::canceled_error());
+    }
+    let pg_cancel_token = client.cancel_token();
+    let progress_clock = Arc::new(StreamProgressClock::new());
+    let progress_clock_for_stream = progress_clock.clone();
+    let mut on_stream_item = |item| {
+        let row_received = matches!(&item, PostgresQueryStreamItem::Row(_));
+        on_item(item)?;
+        if row_received {
+            progress_clock_for_stream.mark();
+        }
+        Ok(())
+    };
+    let timeout_error =
+        format!("Query timed out after {} seconds", budget.query_timeout.map_or(0, |timeout| timeout.as_secs()));
+    let stream = stream_select_query_inner_with_mode(client, sql, row_limit, &mut on_stream_item, true);
+    tokio::pin!(stream);
+    let result = await_stream_with_progress_timeout(
+        stream.as_mut(),
+        budget.query_timeout,
+        progress_clock,
+        cancel_token,
+        timeout_error.clone(),
+    )
+    .await;
+
+    if result.as_ref().is_err_and(|error| error == &timeout_error || error == crate::query::QUERY_CANCELED) {
+        let original_error = result.as_ref().expect_err("timeout or cancellation result").clone();
+        cancel_postgres_query(pg_cancel_token, cancel_context, budget.cancel_timeout).await;
+        if tokio::time::timeout(budget.cleanup_timeout, stream.as_mut()).await.is_err() {
+            return Err(format!(
+                "{}; PostgreSQL stream cleanup timed out after {} seconds",
+                original_error,
+                budget.cleanup_timeout.as_secs()
+            ));
+        }
+    }
+
+    result
 }
 
 async fn stream_select_query_inner_with_mode(
@@ -9790,6 +9842,44 @@ mod tests {
         .expect_err("a stalled query should time out");
 
         assert_eq!(error, "query inactivity timeout");
+    }
+
+    #[tokio::test]
+    async fn postgres_row_query_timeout_covers_stall_after_last_row() {
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let progress_clock_for_query = progress_clock.clone();
+        let error = await_stream_with_progress_timeout(
+            async move {
+                progress_clock_for_query.mark();
+                std::future::pending::<Result<(), String>>().await
+            },
+            Some(Duration::from_millis(10)),
+            progress_clock,
+            None,
+            "query completion inactivity timeout".to_string(),
+        )
+        .await
+        .expect_err("a stream stalled after its last row should time out");
+
+        assert_eq!(error, "query completion inactivity timeout");
+    }
+
+    #[tokio::test]
+    async fn postgres_row_query_without_timeout_still_honors_cancellation() {
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+        let error = await_stream_with_progress_timeout(
+            std::future::pending::<Result<(), String>>(),
+            None,
+            progress_clock,
+            Some(&cancel_token),
+            "disabled query timeout".to_string(),
+        )
+        .await
+        .expect_err("cancellation must remain active when query timeout is disabled");
+
+        assert_eq!(error, crate::query::QUERY_CANCELED);
     }
 
     #[test]

@@ -1275,6 +1275,8 @@ export interface SqlCompletionForeignKey {
   ref_column: string;
 }
 
+export type SqlCompletionClosingQuote = '"' | "'" | "`" | "]";
+
 export interface SqlCompletionItem {
   label: string;
   filterText?: string;
@@ -1282,7 +1284,7 @@ export interface SqlCompletionItem {
   detail?: string;
   info?: string | ((completion: Completion) => CompletionInfo | Promise<CompletionInfo>);
   apply?: string;
-  replaceClosingQuote?: '"' | "'";
+  replaceClosingQuote?: SqlCompletionClosingQuote;
   boost: number;
   exactMatch?: boolean;
   dedupeKey?: string;
@@ -1332,6 +1334,7 @@ export type SqlCompletionContextKind = "table" | "schema" | "catalog" | "routine
 
 export interface SqlCompletionContext {
   prefix: string;
+  replacementRange?: { start: number; end: number };
   qualifier?: string;
   qualifierParts?: string[];
   suggestTables: boolean;
@@ -1365,6 +1368,33 @@ export interface SqlCompletionContext {
   openingParenAfterCursor: boolean;
   contextKind: SqlCompletionContextKind;
   dataTypeContext: boolean;
+}
+
+const SQL_COMPLETION_CLOSING_QUOTES: Readonly<Record<string, SqlCompletionClosingQuote>> = {
+  '"': '"',
+  "'": "'",
+  "`": "`",
+  "[": "]",
+};
+
+export function prepareSqlCompletionReplacement(sql: string, cursor: number, context: Pick<SqlCompletionContext, "prefix" | "qualifier" | "replacementRange">, items: SqlCompletionItem[]): { from: number; items: SqlCompletionItem[] } {
+  const range = context.replacementRange;
+  const from = range && range.start >= 0 && range.start <= cursor && range.end === cursor ? range.start : cursor - context.prefix.length;
+  const closingQuote = from < cursor ? SQL_COMPLETION_CLOSING_QUOTES[sql[from] ?? ""] : undefined;
+  if (!closingQuote) return { from, items };
+  const replaceClosingQuote = sql[cursor] === closingQuote ? closingQuote : undefined;
+  return {
+    from,
+    items: items.map((item) => {
+      let prepared = item;
+      const apply = item.apply ?? item.label;
+      if (item.type === "column" && !(apply.startsWith(sql[from] ?? "") && apply.endsWith(closingQuote)) && (context.qualifier || !apply.includes("."))) {
+        const escaped = apply.replaceAll(closingQuote, closingQuote + closingQuote);
+        prepared = { ...prepared, apply: `${sql[from]}${escaped}${closingQuote}` };
+      }
+      return replaceClosingQuote && !prepared.replaceClosingQuote ? { ...prepared, replaceClosingQuote } : prepared;
+    }),
+  };
 }
 
 export interface PostgresSequenceLiteralCompletionContext {

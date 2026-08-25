@@ -831,6 +831,10 @@ export async function getTableComment(_connectionId: string, _database: string, 
   throw new Error("Table comment lookup is not available in the web backend");
 }
 
+export async function getMysqlTableAutoIncrement(_connectionId: string, _database: string, _table: string): Promise<string | null> {
+  throw new Error("MySQL AUTO_INCREMENT metadata is not available in the web backend");
+}
+
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string, tableNameFilter?: TableNameFilter): Promise<ObjectInfo[]> {
   return get(
     `/api/schema/objects?${qs({

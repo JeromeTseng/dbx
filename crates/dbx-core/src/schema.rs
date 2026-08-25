@@ -1162,6 +1162,38 @@ pub async fn get_table_comment_core(
     result
 }
 
+pub async fn get_mysql_table_auto_increment_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    table: &str,
+) -> Result<Option<String>, String> {
+    let db_config = connection_config(state, connection_id).await;
+    let native_mysql = db_config.as_ref().is_some_and(|config| {
+        config.db_type == DatabaseType::Mysql
+            && config
+                .driver_profile
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(|profile| profile.is_empty() || profile.eq_ignore_ascii_case("mysql"))
+    });
+    if !native_mysql {
+        return Err("AUTO_INCREMENT metadata is supported only for native MySQL connections.".to_string());
+    }
+
+    retry_metadata_connection_for_session(state, connection_id, Some(database), None, || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+        match &pool {
+            PoolKind::Mysql(pool, mode) if *mode != MysqlMode::OceanBaseOracle => {
+                db::mysql::get_table_auto_increment(pool, database, table).await
+            }
+            _ => Err("AUTO_INCREMENT metadata is supported only for native MySQL connections.".to_string()),
+        }
+    })
+    .await
+}
+
 async fn get_table_comment_core_for_session(
     state: &AppState,
     connection_id: &str,
@@ -6800,6 +6832,21 @@ async fn list_indexes_core_for_session(
                     drop(connections);
                     return external_driver_gaussdb_m_indexes(session, config.as_ref(), database, schema, table).await;
                 }
+                let config = config.clone();
+                let session = session.clone();
+                drop(connections);
+                return session
+                    .invoke_with_timeout::<Vec<db::IndexInfo>>(
+                        "listIndexes",
+                        serde_json::json!({
+                            "connection": config.as_ref(),
+                            "database": database,
+                            "schema": schema,
+                            "table": table,
+                        }),
+                        agent_metadata_timeout(Some(config.as_ref())),
+                    )
+                    .await;
             }
             if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
                 drop(connections);

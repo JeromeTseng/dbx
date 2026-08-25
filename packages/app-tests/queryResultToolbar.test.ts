@@ -106,6 +106,28 @@ test("the close-tab shortcut clears query results before closing the tab", () =>
   assert.ok(closeShortcut.indexOf("await queryStore.clearQueryResults(queryStore.activeTabId)") < closeShortcut.indexOf("queryStore.closeTab(queryStore.activeTabId)"));
 });
 
+test("the configurable results pane shortcut only toggles existing output", () => {
+  const contentArea = source(contentAreaPath);
+  const app = source(appPath);
+  const toggleStart = contentArea.indexOf("function toggleResultsPane()");
+  const toggleEnd = contentArea.indexOf("function onResultsResized", toggleStart);
+  const toggle = contentArea.slice(toggleStart, toggleEnd);
+  const shortcutStart = app.indexOf("if (isToggleResultsPaneShortcut(e, shortcuts)");
+  const shortcutEnd = app.indexOf("if (isNewQueryShortcut", shortcutStart);
+  const shortcut = app.slice(shortcutStart, shortcutEnd);
+
+  assert.ok(toggleStart >= 0);
+  assert.match(toggle, /if \(props\.activeTab\.mode !== "query" \|\| !hasQueryOutput\.value\) return false/);
+  assert.match(toggle, /resultsPaneOpen\.value = !resultsPaneOpen\.value/);
+  assert.match(toggle, /return true/);
+  assert.doesNotMatch(toggle, /closeQueryResult|clearQueryResults|closeResultSession/);
+  assert.match(contentArea, /defineExpose\(\{[\s\S]*toggleResultsPane/);
+  assert.ok(shortcutStart >= 0);
+  assert.match(shortcut, /contentAreaRef\.value\?\.toggleResultsPane\(\)/);
+  assert.match(shortcut, /e\.preventDefault\(\)/);
+  assert.match(shortcut, /e\.stopPropagation\(\)/);
+});
+
 test("ContentArea keeps MySQL standard explain results available in the shared toolbar", () => {
   const contentArea = source(contentAreaPath);
 

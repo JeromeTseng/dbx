@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { createQueryEditorExecutionViewportOwnership } from "@/lib/editor/queryEditorExecutionViewport";
+import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "@/lib/editor/queryEditorExecutionViewport";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
@@ -83,7 +83,7 @@ describe("QueryEditor execution routing", () => {
 });
 
 describe("QueryEditor execution viewport ownership", () => {
-  it("keeps automatic cursor centering when the user does not interact during execution", () => {
+  it("leaves completion positioning unclaimed when the user does not interact during execution", () => {
     const ownership = createQueryEditorExecutionViewportOwnership();
 
     ownership.beginExecution();
@@ -151,6 +151,47 @@ describe("QueryEditor execution viewport ownership", () => {
     ownership.reset();
 
     expect(ownership.consumeCompletionPreservation()).toBe(false);
+  });
+});
+
+describe("QueryEditor completion cursor visibility", () => {
+  const viewport = { from: 10, to: 20 };
+
+  it("treats a position inside a visible range as visible", () => {
+    expect(isQueryEditorPositionVisible(15, [{ from: 10, to: 20 }], viewport)).toBe(true);
+  });
+
+  it("includes range endpoints but excludes adjacent positions", () => {
+    expect(isQueryEditorPositionVisible(10, [{ from: 10, to: 20 }], viewport)).toBe(true);
+    expect(isQueryEditorPositionVisible(20, [{ from: 10, to: 20 }], viewport)).toBe(true);
+    expect(isQueryEditorPositionVisible(9, [{ from: 10, to: 20 }], viewport)).toBe(false);
+    expect(isQueryEditorPositionVisible(21, [{ from: 10, to: 20 }], viewport)).toBe(false);
+  });
+
+  it("accepts any visible range without treating a folded gap as visible", () => {
+    const visibleRanges = [
+      { from: 10, to: 14 },
+      { from: 17, to: 20 },
+    ];
+
+    expect(isQueryEditorPositionVisible(18, visibleRanges, viewport)).toBe(true);
+    expect(isQueryEditorPositionVisible(15, visibleRanges, viewport)).toBe(false);
+  });
+
+  it("falls back to the viewport when visible ranges are unavailable or empty", () => {
+    expect(isQueryEditorPositionVisible(15, undefined, viewport)).toBe(true);
+    expect(isQueryEditorPositionVisible(15, [], viewport)).toBe(true);
+    expect(isQueryEditorPositionVisible(21, undefined, viewport)).toBe(false);
+  });
+
+  it("checks visibility after completion ownership and before centering", () => {
+    const ownershipCheck = queryEditorSource.indexOf("executionViewportOwnership.consumeCompletionPreservation()");
+    const visibilityCheck = queryEditorSource.indexOf("if (isQueryEditorPositionVisible(pos, currentView.visibleRanges, currentView.viewport)) return");
+    const centerScroll = queryEditorSource.indexOf('EditorView.scrollIntoView(pos, { y: "center" })');
+
+    expect(ownershipCheck).toBeGreaterThan(-1);
+    expect(visibilityCheck).toBeGreaterThan(ownershipCheck);
+    expect(centerScroll).toBeGreaterThan(visibilityCheck);
   });
 });
 

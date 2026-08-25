@@ -24,7 +24,7 @@ import { canFormatSqlForDatabaseType, formatSqlForEditing, compressSqlText, type
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
-import { createQueryEditorExecutionViewportOwnership } from "@/lib/editor/queryEditorExecutionViewport";
+import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "@/lib/editor/queryEditorExecutionViewport";
 import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
 import { insertQueryEditorNewline } from "@/lib/editor/queryEditorNewline";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
@@ -47,6 +47,7 @@ import {
   getSqlCompletionResultValidFor,
   isSqlCompletionSuppressedContext,
   isSqlLikeCompletionStatement,
+  prepareSqlCompletionReplacement,
   recordCompletionSelection,
   selectStarResultColumnsMatch,
   shouldAutoOpenSqlCompletion,
@@ -128,6 +129,7 @@ import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCare
 import { queryEditorCommentTokens, queryEditorLineCommentToken } from "@/lib/editor/queryEditorLineComment";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
+import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
@@ -189,6 +191,11 @@ const props = defineProps<{
 
 function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
   return props.syntaxDialect === "clickhouse" ? props.dialect : (props.syntaxDialect ?? props.dialect);
+}
+
+function queryEditorSelectionLanguage(): "sql" | "text" {
+  const databaseType = props.databaseType;
+  return databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" ? "text" : "sql";
 }
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
@@ -1998,11 +2005,10 @@ function insertNewlineWithoutCompletion(view: EditorViewType): boolean {
 
 function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {
   const databaseType = props.databaseType;
-  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" ? "text" : "sql";
   return extendQueryEditorSelection(currentView, {
     databaseType,
     dialect: sqlBehaviorDialect(),
-    language,
+    language: queryEditorSelectionLanguage(),
   });
 }
 
@@ -3322,6 +3328,11 @@ function buildCompletionResult(items: QueryCompletionItem[], from: number, valid
   };
 }
 
+function buildSqlCompletionResult(items: SqlCompletionItem[], completionContext: SqlCompletionContext, fullDoc: string, position: number) {
+  const replacement = prepareSqlCompletionReplacement(fullDoc, position, completionContext, items);
+  return buildCompletionResult(replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+}
+
 // CodeMirror's built-in matcher only matches single-character queries against
 // the label start, and cannot match pinyin initials against Han labels. Our
 // provider already filters and ranks items itself (substring + pinyin), so
@@ -3674,7 +3685,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
-      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+      return buildSqlCompletionResult(items, completionContext, fullDoc, position);
     }
 
     const useDatabase = props.databaseType === "sqlserver" ? sqlServerUseDatabaseBeforeCursor(fullDoc, position) : undefined;
@@ -3735,7 +3746,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
-      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+      return buildSqlCompletionResult(items, completionContext, fullDoc, position);
     }
 
     const tableNameCompletion = isTableNameCompletionContext(completionContext);
@@ -4042,7 +4053,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
-  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+  return buildSqlCompletionResult(items, completionContext, fullDoc, position);
 }
 
 function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
@@ -4523,7 +4534,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
-  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+  return buildSqlCompletionResult(items, completionContext, fullDoc, position);
 }
 
 function isReferencedTableQualifier(completionContext: ReturnType<typeof getSqlCompletionContext>): boolean {
@@ -5151,6 +5162,16 @@ onMounted(async () => {
       dropCursor(),
       props.readOnly ? [] : scrollPastEnd(),
       EditorView.dragMovesSelection.of((event) => !event.ctrlKey && !event.metaKey),
+      Prec.highest(
+        EditorView.mouseSelectionStyle.of((currentView, event) =>
+          createQueryEditorStringMouseSelection(currentView, event, {
+            databaseType: props.databaseType,
+            dialect: sqlBehaviorDialect(),
+            language: queryEditorSelectionLanguage(),
+            composing: isEditorComposing(currentView),
+          }),
+        ),
+      ),
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
@@ -6018,15 +6039,17 @@ function openReplace(): boolean {
 
 function scrollCursorIntoView() {
   const preserveViewport = executionViewportOwnership.consumeCompletionPreservation();
-  if (!view.value || !editorViewModule || !editorIsActive || preserveViewport) return;
-  const pos = view.value.state.selection.main.head;
+  const currentView = view.value;
+  if (!currentView || !editorViewModule || !editorIsActive || preserveViewport) return;
+  const pos = currentView.state.selection.main.head;
+  if (isQueryEditorPositionVisible(pos, currentView.visibleRanges, currentView.viewport)) return;
   // Use "center" rather than "nearest": by the time this runs, the results pane has already
   // opened/resized and shrunk the editor viewport, so the cursor's old position is often no
   // longer visible. "nearest" then pins it right at the new viewport's edge (Fixes #5281: in a
   // long multi-statement file, the just-executed statement lands flush against the results pane
   // divider), which is exactly where it's hardest to see and re-click. Centering keeps it
   // comfortably visible so the user doesn't have to scroll to find/re-run it.
-  view.value.dispatch({
+  currentView.dispatch({
     effects: editorViewModule.EditorView.scrollIntoView(pos, { y: "center" }),
   });
 }
