@@ -1,0 +1,216 @@
+name: VSign Windows Smoke Test
+
+on:
+  push:
+    tags:
+      - "trustasia-vsign-smoke-*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-sign-verify:
+    runs-on: windows-2022
+    environment: release-signing
+    timeout-minutes: 20
+    steps:
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build Windows smoke test
+        shell: pwsh
+        run: |
+          $workDir = Join-Path $env:RUNNER_TEMP "vsign-smoke-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $sourceDir = Join-Path $workDir "source"
+          $publishDir = Join-Path $workDir "publish"
+          $signedDir = Join-Path $workDir "signed"
+          New-Item -ItemType Directory -Force -Path $sourceDir, $publishDir, $signedDir | Out-Null
+
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net8.0</TargetFramework>
+              <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+              <SelfContained>true</SelfContained>
+              <PublishSingleFile>true</PublishSingleFile>
+              <AssemblyName>DBX-VSign-Smoke</AssemblyName>
+              <Nullable>enable</Nullable>
+              <ImplicitUsings>enable</ImplicitUsings>
+            </PropertyGroup>
+          </Project>
+          '@ | Set-Content -LiteralPath (Join-Path $sourceDir "DBX-VSign-Smoke.csproj") -Encoding utf8
+
+          @'
+          Console.WriteLine("DBX VSign smoke test completed.");
+          '@ | Set-Content -LiteralPath (Join-Path $sourceDir "Program.cs") -Encoding utf8
+
+          dotnet publish (Join-Path $sourceDir "DBX-VSign-Smoke.csproj") `
+            --configuration Release `
+            --output $publishDir
+          if ($LASTEXITCODE -ne 0) {
+            throw "Smoke test build failed with exit code $LASTEXITCODE"
+          }
+
+          $unsignedFile = Join-Path $publishDir "DBX-VSign-Smoke.exe"
+          if (!(Test-Path -LiteralPath $unsignedFile -PathType Leaf)) {
+            throw "Unsigned smoke test executable was not created"
+          }
+
+          "VSIGN_WORK_DIR=$workDir" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "VSIGN_UNSIGNED_FILE=$unsignedFile" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "VSIGN_SIGNED_FILE=$(Join-Path $signedDir 'DBX-VSign-Smoke-signed.exe')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "VSIGN_REPORT_FILE=$(Join-Path $signedDir 'signature-report.txt')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download and verify VSign CLI
+        shell: pwsh
+        env:
+          VSIGN_CLI_URL: https://github.com/g5wsg/vsign-github-test1/releases/download/vsign-cli-v1/ssigncode.exe
+          VSIGN_CLI_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
+        run: |
+          $toolPath = Join-Path $env:VSIGN_WORK_DIR "ssigncode.exe"
+          Invoke-WebRequest -Uri $env:VSIGN_CLI_URL -OutFile $toolPath
+
+          $actualHash = (Get-FileHash -LiteralPath $toolPath -Algorithm SHA256).Hash
+          $expectedHash = $env:VSIGN_CLI_SHA256.Replace(" ", "").ToUpperInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "VSign CLI SHA256 mismatch. Expected $expectedHash, got $actualHash"
+          }
+
+          "VSIGN_CLI=$toolPath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          & $toolPath version
+
+      - name: Restore and verify VSign operator PFX
+        shell: pwsh
+        env:
+          VSIGN_OPERATOR_PFX_B64: ${{ secrets.VSIGN_OPERATOR_PFX_B64 }}
+          VSIGN_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
+        run: |
+          foreach ($value in @(
+            $env:VSIGN_OPERATOR_PFX_B64,
+            $env:VSIGN_OPERATOR_PWD,
+            $env:VSIGN_OPERATOR_SHA1
+          )) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw "VSign operator PFX configuration is incomplete"
+            }
+          }
+
+          $operatorDir = Join-Path $env:VSIGN_WORK_DIR "operator"
+          $operatorFile = Join-Path $operatorDir "dbx-github-ci@ssigncode.pfx"
+          New-Item -ItemType Directory -Force -Path $operatorDir | Out-Null
+
+          try {
+            $pfxBytes = [Convert]::FromBase64String($env:VSIGN_OPERATOR_PFX_B64.Trim())
+            [IO.File]::WriteAllBytes($operatorFile, $pfxBytes)
+            $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+            $operatorCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+              $operatorFile,
+              $env:VSIGN_OPERATOR_PWD,
+              $flags
+            )
+          }
+          catch {
+            throw "Cannot restore or decrypt the VSign operator PFX: $($_.Exception.Message)"
+          }
+
+          try {
+            $actualSha1 = $operatorCert.Thumbprint.Replace(" ", "").ToUpperInvariant()
+            $expectedSha1 = $env:VSIGN_OPERATOR_SHA1.Replace(" ", "").ToUpperInvariant()
+            if ($actualSha1 -ne $expectedSha1) {
+              throw "Operator certificate mismatch. Expected $expectedSha1, got $actualSha1"
+            }
+            if (!$operatorCert.HasPrivateKey) {
+              throw "The operator PFX does not contain a private key"
+            }
+            Write-Host "Operator certificate SHA1: $actualSha1"
+          }
+          finally {
+            $operatorCert.Dispose()
+          }
+
+          "SSIGNCODE_OPERATOR_STORE=file" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SSIGNCODE_OPERATOR_DIR=$operatorDir" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SSIGNCODE_OPERATOR_FILE=$operatorFile" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Sign Windows smoke test
+        shell: pwsh
+        env:
+          VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
+          VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
+          SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
+        run: |
+          & $env:VSIGN_CLI vsign `
+            -s $env:VSIGN_SERVER `
+            --cert_from csign `
+            -u dbx-github-ci `
+            --cert_hash $env:VSIGN_CERT_HASH `
+            -k $env:VSIGN_KEY_PIN `
+            --hash sha256 `
+            -i $env:VSIGN_UNSIGNED_FILE `
+            -o $env:VSIGN_SIGNED_FILE
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "VSign failed with exit code $LASTEXITCODE"
+          }
+          if (!(Test-Path -LiteralPath $env:VSIGN_SIGNED_FILE -PathType Leaf)) {
+            throw "Signed smoke test executable was not created"
+          }
+
+      - name: Verify and run signed executable
+        shell: pwsh
+        env:
+          VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
+        run: |
+          $signature = Get-AuthenticodeSignature -LiteralPath $env:VSIGN_SIGNED_FILE
+          if ($null -eq $signature.SignerCertificate) {
+            throw "No Authenticode signature was found"
+          }
+
+          $actualSha1 = $signature.SignerCertificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
+          $expectedSha1 = $env:VSIGN_CERT_HASH.Replace(" ", "").ToUpperInvariant()
+          if ($actualSha1 -ne $expectedSha1) {
+            throw "Signing certificate mismatch. Expected $expectedSha1, got $actualSha1"
+          }
+          if ($signature.Status -ne "Valid") {
+            throw "Authenticode signature status is $($signature.Status): $($signature.StatusMessage)"
+          }
+          if ($null -eq $signature.TimeStamperCertificate) {
+            throw "The signed executable does not contain a timestamp certificate"
+          }
+
+          & $env:VSIGN_SIGNED_FILE
+          if ($LASTEXITCODE -ne 0) {
+            throw "Signed smoke test executable failed with exit code $LASTEXITCODE"
+          }
+
+          @(
+            "Status: $($signature.Status)"
+            "Signer: $($signature.SignerCertificate.Subject)"
+            "Signer SHA1: $actualSha1"
+            "Timestamp signer: $($signature.TimeStamperCertificate.Subject)"
+            "File SHA256: $((Get-FileHash -LiteralPath $env:VSIGN_SIGNED_FILE -Algorithm SHA256).Hash)"
+          ) | Set-Content -LiteralPath $env:VSIGN_REPORT_FILE -Encoding utf8
+
+      - name: Upload signed Windows smoke test
+        uses: actions/upload-artifact@v4
+        with:
+          name: DBX-VSign-Smoke-windows-x64
+          path: |
+            ${{ env.VSIGN_SIGNED_FILE }}
+            ${{ env.VSIGN_REPORT_FILE }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove temporary VSign files
+        if: always()
+        shell: pwsh
+        run: |
+          if (![string]::IsNullOrWhiteSpace($env:VSIGN_WORK_DIR) -and
+              (Test-Path -LiteralPath $env:VSIGN_WORK_DIR)) {
+            Remove-Item -LiteralPath $env:VSIGN_WORK_DIR -Recurse -Force
+          }
