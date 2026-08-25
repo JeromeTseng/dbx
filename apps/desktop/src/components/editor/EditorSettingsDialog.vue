@@ -7350,7 +7350,7 @@ onUnmounted(() => {
                               <span class="flex w-full min-w-0 items-center gap-2">
                                 <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" :icon-path="provider.iconPath" />
                                 <span class="min-w-0 flex-1 truncate">{{ provider.label }}</span>
-                                <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] font-normal">{{ t("ai.sponsored") }}</Badge>
+                                <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] font-normal">{{ t("ai.jalapenoSponsored") }}</Badge>
                               </span>
                             </SelectItem>
                           </SelectGroup>
