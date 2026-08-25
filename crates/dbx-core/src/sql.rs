@@ -326,6 +326,7 @@ pub struct SqlStatementSplitter {
     previous: Option<char>,
     pending_mysql_line_comment_dashes: bool,
     custom_delimiter: Option<String>,
+    stop_on_error: bool,
     options: SqlParsingOptions,
 }
 
@@ -507,18 +508,16 @@ impl SqlStatementSplitter {
                     let buf_end = self.buffer.len() - 1;
                     let last_line_start = self.buffer[..buf_end].rfind('\n').map_or(0, |p| p + 1);
                     let last_line = self.buffer[last_line_start..buf_end].trim();
-                    if self.options.profile.supports_psql_control_commands
-                        && is_ignorable_psql_control_command(last_line)
-                    {
-                        let before = self.buffer[..last_line_start].trim();
-                        if has_executable_sql_with_options(before, self.options) {
-                            statements.push(before.to_string());
+                    if self.options.profile.supports_psql_control_commands {
+                        if let Some(command) = parse_ignorable_psql_control_command(last_line) {
+                            if command == PsqlControlCommand::OnErrorStop {
+                                self.stop_on_error = true;
+                            }
+                            self.buffer.truncate(last_line_start);
+                            self.previous = self.buffer.chars().next_back();
+                            i += 1;
+                            continue;
                         }
-                        self.buffer.clear();
-                        self.postgres_dollar_quoted_routine = false;
-                        self.previous = None;
-                        i += 1;
-                        continue;
                     }
                     if self.options.profile.supports_slash_line_block_delimiter && last_line == "/" {
                         let before = self.buffer[..last_line_start].trim();
@@ -575,15 +574,18 @@ impl SqlStatementSplitter {
         }
         let trimmed = self.buffer.trim();
         let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
-        if self.options.profile.supports_psql_control_commands && is_ignorable_psql_control_command(last_line) {
-            let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
-            if has_executable_sql_with_options(before, self.options) {
-                statements.push(before.to_string());
+        if self.options.profile.supports_psql_control_commands {
+            if let Some(command) = parse_ignorable_psql_control_command(last_line) {
+                if command == PsqlControlCommand::OnErrorStop {
+                    self.stop_on_error = true;
+                }
+                let line_start = self.buffer.rfind('\n').map_or(0, |pos| pos + 1);
+                self.buffer.truncate(line_start);
             }
-            self.buffer.clear();
-        } else if self.options.profile.supports_custom_delimiter_commands
-            && parse_delimiter_command(last_line).is_some()
-        {
+        }
+        let trimmed = self.buffer.trim();
+        let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
+        if self.options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
             let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
             if has_executable_sql_with_options(before, self.options) {
                 statements.push(before.to_string());
@@ -602,6 +604,10 @@ impl SqlStatementSplitter {
         }
         self.push_current_statement(&mut statements);
         statements
+    }
+
+    pub fn stop_on_error(&self) -> bool {
+        self.stop_on_error
     }
 
     fn push_current_statement(&mut self, statements: &mut Vec<String>) {
@@ -631,7 +637,25 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
 }
 
 pub fn split_sql_statements_for_database(sql: &str, db_type: DatabaseType) -> Vec<String> {
-    split_sql_statements_with_options(sql, SqlParsingOptions::for_database_type(db_type))
+    sql_execution_plan_for_database(sql, db_type).statements
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlExecutionPlan {
+    pub statements: Vec<String>,
+    pub stop_on_error: bool,
+}
+
+pub fn sql_execution_plan_for_database(sql: &str, db_type: DatabaseType) -> SqlExecutionPlan {
+    let options = SqlParsingOptions::for_database_type(db_type);
+    if !options.profile.supports_psql_control_commands {
+        return SqlExecutionPlan { statements: split_sql_statements_with_options(sql, options), stop_on_error: false };
+    }
+
+    let (sql, stop_on_error) = preprocess_psql_control_commands(sql, options.profile);
+    let mut parsing_options = options;
+    parsing_options.profile.supports_psql_control_commands = false;
+    SqlExecutionPlan { statements: split_sql_statements_with_options(&sql, parsing_options), stop_on_error }
 }
 
 pub fn split_sql_statements_with_options(sql: &str, options: SqlParsingOptions) -> Vec<String> {
@@ -656,7 +680,13 @@ pub fn find_statement_at_cursor_for_database(sql: &str, cursor_pos: usize, db_ty
     if db_type == DatabaseType::SqlServer {
         return find_sqlserver_statement_at_cursor(sql, cursor_pos);
     }
-    find_statement_at_cursor_with_options(sql, cursor_pos, SqlParsingOptions::for_database_type(db_type))
+    let mut options = SqlParsingOptions::for_database_type(db_type);
+    if options.profile.supports_psql_control_commands {
+        let (sql, _) = preprocess_psql_control_commands(sql, options.profile);
+        options.profile.supports_psql_control_commands = false;
+        return find_statement_at_cursor_with_options(&sql, cursor_pos, options);
+    }
+    find_statement_at_cursor_with_options(sql, cursor_pos, options)
 }
 
 pub fn find_statement_at_cursor_with_options(sql: &str, cursor_pos: usize, options: SqlParsingOptions) -> String {
@@ -890,13 +920,6 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
             if ch == '\n' {
                 let line_start = sql[..i].rfind('\n').map_or(0, |pos| pos + 1);
                 let line = sql[line_start..i].trim();
-                if options.profile.supports_psql_control_commands && is_ignorable_psql_control_command(line) {
-                    push_statement_range(&mut ranges, sql, start, line_start, options);
-                    start = i + ch.len_utf8();
-                    postgres_dollar_quoted_routine = false;
-                    i = start;
-                    continue;
-                }
                 if options.profile.supports_slash_line_block_delimiter && line == "/" {
                     push_statement_range(&mut ranges, sql, start, line_start, options);
                     start = i + ch.len_utf8();
@@ -989,11 +1012,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
 
     let trimmed = sql[start..].trim();
     let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
-    if options.profile.supports_psql_control_commands && is_ignorable_psql_control_command(last_line) {
-        if let Some(line_start) = sql[start..].rfind('\n').map(|pos| start + pos + 1) {
-            push_statement_range(&mut ranges, sql, start, line_start, options);
-        }
-    } else if options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
+    if options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
         if let Some(line_start) = sql[start..].rfind('\n').map(|pos| start + pos + 1) {
             push_statement_range(&mut ranges, sql, start, line_start, options);
         }
@@ -1455,35 +1474,68 @@ fn parse_delimiter_command(line: &str) -> Option<&str> {
     rest.map(|r| r.trim()).filter(|r| !r.is_empty())
 }
 
-fn is_ignorable_psql_control_command(line: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PsqlControlCommand {
+    OnErrorStop,
+    ClientDisplay,
+}
+
+fn parse_ignorable_psql_control_command(line: &str) -> Option<PsqlControlCommand> {
     let mut parts = line.split_whitespace();
-    let Some(command) = parts.next() else {
-        return false;
-    };
+    let command = parts.next()?;
 
     if command.eq_ignore_ascii_case("\\timing") {
-        return parts.next().is_none_or(|value| value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("off"))
-            && parts.next().is_none();
+        let valid =
+            parts.next().is_none_or(|value| value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("off"));
+        return (valid && parts.next().is_none()).then_some(PsqlControlCommand::ClientDisplay);
     }
 
     if !command.eq_ignore_ascii_case("\\set") {
-        return false;
+        return None;
     }
-    let Some(variable) = parts.next() else {
-        return false;
-    };
-    let Some(value) = parts.next() else {
-        return false;
-    };
+    let variable = parts.next()?;
+    let value = parts.next()?;
     if parts.next().is_some() {
-        return false;
+        return None;
     }
 
     match variable.to_ascii_uppercase().as_str() {
-        "ON_ERROR_STOP" => matches!(value.to_ascii_lowercase().as_str(), "on" | "true" | "1"),
-        "VERBOSITY" => matches!(value.to_ascii_lowercase().as_str(), "default" | "verbose" | "terse" | "sqlstate"),
-        _ => false,
+        "ON_ERROR_STOP" if matches!(value.to_ascii_lowercase().as_str(), "on" | "true" | "1") => {
+            Some(PsqlControlCommand::OnErrorStop)
+        }
+        "VERBOSITY" if matches!(value.to_ascii_lowercase().as_str(), "default" | "verbose" | "terse" | "sqlstate") => {
+            Some(PsqlControlCommand::ClientDisplay)
+        }
+        _ => None,
     }
+}
+
+fn preprocess_psql_control_commands(sql: &str, profile: SqlDialectProfile) -> (String, bool) {
+    let mut output = String::with_capacity(sql.len());
+    let mut scanner = SqlScanner::with_profile(profile);
+    let mut offset = 0usize;
+    let mut stop_on_error = false;
+
+    for segment in sql.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        let command = (!scanner.is_masked()).then(|| parse_ignorable_psql_control_command(line.trim())).flatten();
+        if let Some(command) = command {
+            stop_on_error |= command == PsqlControlCommand::OnErrorStop;
+            output.extend(line.chars().map(|ch| if ch.is_whitespace() { ch } else { ' ' }));
+            if segment.ends_with('\n') {
+                output.push('\n');
+                scanner.step(sql, offset + line.len(), '\n');
+            }
+        } else {
+            output.push_str(segment);
+            for (relative_idx, ch) in segment.char_indices() {
+                scanner.step(sql, offset + relative_idx, ch);
+            }
+        }
+        offset += segment.len();
+    }
+
+    (output, stop_on_error)
 }
 
 pub fn statement_summary(statement: &str) -> String {
@@ -3581,6 +3633,7 @@ END;";
 
         assert!(splitter.push_chunk("\\set ON_ERROR_").is_empty());
         assert!(splitter.push_chunk("STOP on\n\\tim").is_empty());
+        assert!(splitter.stop_on_error());
         assert_eq!(
             splitter.push_chunk("ing\nDECLARE\n  value NUMBER := 1;\nBEGIN\n  value := value + 1;\nEND;\n/\n"),
             vec!["DECLARE\n  value NUMBER := 1;\nBEGIN\n  value := value + 1;\nEND;"]
@@ -3589,20 +3642,59 @@ END;";
     }
 
     #[test]
-    fn gaussdb_split_does_not_ignore_psql_variable_assignment() {
-        let sql = "\\set tx_date 20240824\nDECLARE\n  value TEXT := '$tx_date';\nBEGIN\n  NULL;\nEND;\n/";
-
+    fn gaussdb_psql_control_does_not_submit_unfinished_query_buffer() {
+        let sql = "SELECT\n\\timing\n  1;\nSELECT 2;";
         let statements = split_sql_statements_for_database(sql, DatabaseType::Gaussdb);
-        assert!(statements[0].starts_with("\\set tx_date 20240824"));
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].split_whitespace().collect::<Vec<_>>(), vec!["SELECT", "1"]);
+        assert_eq!(statements[1], "SELECT 2");
+
+        let mut splitter =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Gaussdb));
+        assert!(splitter.push_chunk("SELECT\n\\tim").is_empty());
+        assert_eq!(splitter.push_chunk("ing\n  1;"), vec!["SELECT\n  1"]);
+    }
+
+    #[test]
+    fn gaussdb_split_does_not_ignore_psql_variable_assignment() {
+        for control in ["\\set tx_date 20240824", "\\set MY_ON_ERROR_STOP on", "\\set ON_ERROR_STOP_EXTRA on"] {
+            let sql = format!("{control}\nDECLARE\n  value TEXT := '$tx_date';\nBEGIN\n  NULL;\nEND;\n/");
+            let statements = split_sql_statements_for_database(&sql, DatabaseType::Gaussdb);
+            assert!(statements[0].starts_with(control));
+        }
     }
 
     #[test]
     fn gaussdb_ignores_only_safe_psql_controls() {
-        assert!(super::is_ignorable_psql_control_command("\\set ON_ERROR_STOP on"));
-        assert!(super::is_ignorable_psql_control_command("\\set VERBOSITY verbose"));
-        assert!(super::is_ignorable_psql_control_command("\\timing"));
-        assert!(!super::is_ignorable_psql_control_command("\\set ON_ERROR_STOP off"));
-        assert!(!super::is_ignorable_psql_control_command("\\set tx_date 20240824"));
+        assert_eq!(
+            super::parse_ignorable_psql_control_command("\\set ON_ERROR_STOP on"),
+            Some(super::PsqlControlCommand::OnErrorStop)
+        );
+        assert_eq!(
+            super::parse_ignorable_psql_control_command("\\set VERBOSITY verbose"),
+            Some(super::PsqlControlCommand::ClientDisplay)
+        );
+        assert_eq!(
+            super::parse_ignorable_psql_control_command("\\timing"),
+            Some(super::PsqlControlCommand::ClientDisplay)
+        );
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set ON_ERROR_STOP off"), None);
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set tx_date 20240824"), None);
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set MY_ON_ERROR_STOP on"), None);
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set ON_ERROR_STOP_EXTRA on"), None);
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set ON_ERROR_STOP sometimes"), None);
+    }
+
+    #[test]
+    fn gaussdb_execution_plan_preserves_on_error_stop() {
+        let plan = super::sql_execution_plan_for_database(
+            "\\set ON_ERROR_STOP on\nSELECT 1;\nSELECT 2;",
+            DatabaseType::Gaussdb,
+        );
+
+        assert!(plan.stop_on_error);
+        assert_eq!(plan.statements, vec!["SELECT 1", "SELECT 2"]);
     }
 
     #[test]
