@@ -6,11 +6,13 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::ddl_profile::{profile_for, ColumnDdlSyntax, CommentDdlSyntax, DdlDialectProfile};
+use crate::sql_dialect::ddl_profile::{
+    profile_for, AutoIncSyntax, ColumnDdlSyntax, CommentDdlSyntax, DdlDialectProfile,
+};
 use crate::sql_dialect::descriptor::DialectKind;
 use crate::sql_dialect::inference::{ColumnType, DefaultTypeInferenceEngine, TypeInferenceEngine};
 use crate::sql_dialect::type_rewrite::{
-    apply_auto_inc_to_column_def, rewrite_column_type, type_looks_integer, AutoIncColumnBuild,
+    apply_auto_inc_to_column_def, column_is_auto_increment, rewrite_column_type, type_looks_integer, AutoIncColumnBuild,
 };
 use crate::sql_parser::ast_filter::AstTransmitFilter;
 use crate::types::{
@@ -2162,13 +2164,15 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     for name in common {
         let Some(source) = source_details.get(name.as_str()) else { continue };
         let Some(target) = target_details.get(name.as_str()) else { continue };
-        let column_diffs = diff_columns_with_options(
+        let column_diffs = diff_columns_with_dialect_options(
             &source.columns,
             &target.columns,
             options.ignore_comments,
             options.compare_column_order,
             options.detect_renames,
             options.rename_threshold,
+            options.source_dialect,
+            options.target_dialect,
         );
         let index_diffs = diff_indexes(&source.indexes, &target.indexes);
         let foreign_key_diffs = diff_foreign_keys(&source.foreign_keys, &target.foreign_keys);
@@ -2474,6 +2478,43 @@ pub fn diff_columns(source: &[ColumnInfo], target: &[ColumnInfo]) -> Vec<ColumnD
     diff_columns_with_options(source, target, false, false, false, 0.5)
 }
 
+fn normalize_mysql_integer_type_for_comparison(data_type: &str) -> String {
+    let normalized = data_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let Some(open) = normalized.find('(') else {
+        return normalized;
+    };
+    let Some(close) = normalized[open + 1..].find(')').map(|index| open + 1 + index) else {
+        return normalized;
+    };
+    let base = normalized[..open].trim();
+    let width = normalized[open + 1..close].trim();
+    let integer_type = matches!(base, "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year");
+    if !integer_type || width.is_empty() || !width.bytes().all(|byte| byte.is_ascii_digit()) {
+        return normalized;
+    }
+    let suffix = normalized[close + 1..].trim();
+    if suffix.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base} {suffix}")
+    }
+}
+
+fn column_types_equal_for_dialects(
+    source_type: &str,
+    target_type: &str,
+    source_dialect: Option<DialectKind>,
+    target_dialect: Option<DialectKind>,
+) -> bool {
+    if source_type.eq_ignore_ascii_case(target_type) {
+        return true;
+    }
+    source_dialect == Some(DialectKind::Mysql)
+        && target_dialect == Some(DialectKind::Mysql)
+        && normalize_mysql_integer_type_for_comparison(source_type)
+            == normalize_mysql_integer_type_for_comparison(target_type)
+}
+
 fn column_type_similarity_score(source_type: &str, target_type: &str) -> f64 {
     let s = ColumnType::parse(source_type).base_type.to_ascii_lowercase();
     let t = ColumnType::parse(target_type).base_type.to_ascii_lowercase();
@@ -2514,6 +2555,29 @@ fn diff_columns_with_options(
     detect_renames: bool,
     rename_threshold: f64,
 ) -> Vec<ColumnDiff> {
+    diff_columns_with_dialect_options(
+        source,
+        target,
+        ignore_comments,
+        compare_column_order,
+        detect_renames,
+        rename_threshold,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_columns_with_dialect_options(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    ignore_comments: bool,
+    compare_column_order: bool,
+    detect_renames: bool,
+    rename_threshold: f64,
+    source_dialect: Option<DialectKind>,
+    target_dialect: Option<DialectKind>,
+) -> Vec<ColumnDiff> {
     let mut diffs = Vec::new();
     let target_map: HashMap<&str, &ColumnInfo> = target.iter().map(|column| (column.name.as_str(), column)).collect();
     let source_map: HashMap<&str, &ColumnInfo> = source.iter().map(|column| (column.name.as_str(), column)).collect();
@@ -2526,7 +2590,12 @@ fn diff_columns_with_options(
     for (source_index, source_column) in source.iter().enumerate() {
         if let Some(target_column) = target_map.get(source_column.name.as_str()) {
             let mut changes = Vec::new();
-            if source_column.data_type.to_lowercase() != target_column.data_type.to_lowercase() {
+            if !column_types_equal_for_dialects(
+                &source_column.data_type,
+                &target_column.data_type,
+                source_dialect,
+                target_dialect,
+            ) {
                 changes.push(format!("type: {} → {}", target_column.data_type, source_column.data_type));
             }
             if source_column.is_nullable != target_column.is_nullable {
@@ -3133,6 +3202,11 @@ fn column_def(col: &ColumnInfo, db_type: DatabaseType, source_dialect: Option<Di
                 col.extra.as_deref()
             )
         ));
+    }
+    if column_is_auto_increment(col) {
+        if let AutoIncSyntax::Suffix(suffix) = profile.auto_inc {
+            definition.push_str(suffix);
+        }
     }
     if profile.inline_column_comment {
         if let Some(comment) = &col.comment {
@@ -7569,6 +7643,60 @@ mod tests {
         assert_eq!(column_type_similarity_score("int(11)", "int(11)"), 1.0);
         assert_eq!(column_type_similarity_score("int(11)", "integer"), 1.0);
         assert_eq!(column_type_similarity_score("varchar(255)", "varchar(64)"), 1.0);
+    }
+
+    #[test]
+    fn mysql_same_dialect_ignores_only_integer_display_widths() {
+        let source = vec![
+            column("id", "int(11) unsigned", None),
+            column("status", "tinyint(4)", None),
+            column("amount", "decimal(10,2)", None),
+            column("name", "varchar(128)", None),
+        ];
+        let target = vec![
+            column("id", "int unsigned", None),
+            column("status", "tinyint", None),
+            column("amount", "decimal(12,2)", None),
+            column("name", "varchar(64)", None),
+        ];
+
+        let diffs = diff_columns_with_dialect_options(
+            &source,
+            &target,
+            false,
+            false,
+            false,
+            0.5,
+            Some(DialectKind::Mysql),
+            Some(DialectKind::Mysql),
+        );
+
+        assert_eq!(diffs.iter().map(|diff| diff.name.as_str()).collect::<Vec<_>>(), vec!["amount", "name"]);
+        assert!(diffs.iter().all(|diff| diff.changes.iter().any(|change| change.starts_with("type:"))));
+    }
+
+    #[test]
+    fn mysql_modify_column_preserves_explicit_auto_increment() {
+        let mut source = column("id", "int", Some("new comment"));
+        source.is_primary_key = true;
+        source.extra = Some("auto_increment".to_string());
+        let mut target = source.clone();
+        target.comment = Some("old comment".to_string());
+        let diff = ColumnDiff {
+            diff_type: "modified".to_string(),
+            name: "id".to_string(),
+            source: Some(source),
+            target: Some(target),
+            changes: vec!["comment: old comment → new comment".to_string()],
+            add_position: None,
+        };
+
+        let sql = gen_sql(wrap_table_diff("users", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Mysql));
+
+        assert!(
+            sql.contains("MODIFY COLUMN `id` int NOT NULL AUTO_INCREMENT COMMENT 'new comment'"),
+            "MySQL MODIFY must preserve AUTO_INCREMENT: {sql}"
+        );
     }
 
     // -- 32. Multiple renames in one table --
