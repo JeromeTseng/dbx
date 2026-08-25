@@ -330,12 +330,22 @@ pub struct SqlStatementSplitter {
     options: SqlParsingOptions,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SqlStatementWithControl {
+    pub sql: String,
+    pub stop_on_error: bool,
+}
+
 impl SqlStatementSplitter {
     pub fn with_options(options: SqlParsingOptions) -> Self {
         Self { options, ..Self::default() }
     }
 
     pub fn push_chunk(&mut self, chunk: &str) -> Vec<String> {
+        self.push_chunk_with_control(chunk).into_iter().map(|statement| statement.sql).collect()
+    }
+
+    pub(crate) fn push_chunk_with_control(&mut self, chunk: &str) -> Vec<SqlStatementWithControl> {
         let mut statements = Vec::new();
         let chars = chunk.chars().collect::<Vec<_>>();
         let mut i = 0;
@@ -522,7 +532,10 @@ impl SqlStatementSplitter {
                     if self.options.profile.supports_slash_line_block_delimiter && last_line == "/" {
                         let before = self.buffer[..last_line_start].trim();
                         if has_executable_sql_with_options(before, self.options) {
-                            statements.push(before.to_string());
+                            statements.push(SqlStatementWithControl {
+                                sql: before.to_string(),
+                                stop_on_error: self.stop_on_error,
+                            });
                         }
                         self.buffer.clear();
                         self.postgres_dollar_quoted_routine = false;
@@ -541,7 +554,10 @@ impl SqlStatementSplitter {
                         if last_line_start > 0 {
                             let before = self.buffer[..last_line_start].trim();
                             if has_executable_sql_with_options(before, self.options) {
-                                statements.push(before.to_string());
+                                statements.push(SqlStatementWithControl {
+                                    sql: before.to_string(),
+                                    stop_on_error: self.stop_on_error,
+                                });
                             }
                         }
                         self.buffer.clear();
@@ -566,7 +582,11 @@ impl SqlStatementSplitter {
         statements
     }
 
-    pub fn finish(mut self) -> Vec<String> {
+    pub fn finish(self) -> Vec<String> {
+        self.finish_with_control().into_iter().map(|statement| statement.sql).collect()
+    }
+
+    pub(crate) fn finish_with_control(mut self) -> Vec<SqlStatementWithControl> {
         let mut statements = Vec::new();
         if self.pending_mysql_line_comment_dashes {
             self.in_line_comment = true;
@@ -588,13 +608,13 @@ impl SqlStatementSplitter {
         if self.options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
             let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
             if has_executable_sql_with_options(before, self.options) {
-                statements.push(before.to_string());
+                statements.push(SqlStatementWithControl { sql: before.to_string(), stop_on_error: self.stop_on_error });
             }
             self.buffer.clear();
         } else if self.options.profile.supports_slash_line_block_delimiter && last_line == "/" {
             let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
             if has_executable_sql_with_options(before, self.options) {
-                statements.push(before.to_string());
+                statements.push(SqlStatementWithControl { sql: before.to_string(), stop_on_error: self.stop_on_error });
             }
             self.buffer.clear();
         } else if let Some(ref delim) = self.custom_delimiter {
@@ -610,10 +630,10 @@ impl SqlStatementSplitter {
         self.stop_on_error
     }
 
-    fn push_current_statement(&mut self, statements: &mut Vec<String>) {
+    fn push_current_statement(&mut self, statements: &mut Vec<SqlStatementWithControl>) {
         let statement = self.buffer.trim();
         if has_executable_sql_with_options(statement, self.options) {
-            statements.push(statement.to_string());
+            statements.push(SqlStatementWithControl { sql: statement.to_string(), stop_on_error: self.stop_on_error });
         }
         self.buffer.clear();
         self.postgres_dollar_quoted_routine = false;
@@ -3639,6 +3659,25 @@ END;";
             vec!["DECLARE\n  value NUMBER := 1;\nBEGIN\n  value := value + 1;\nEND;"]
         );
         assert!(splitter.finish().is_empty());
+    }
+
+    #[test]
+    fn gaussdb_streaming_split_tracks_on_error_stop_by_statement_position() {
+        let mut splitter =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Gaussdb));
+
+        let mut statements = splitter.push_chunk_with_control("SELECT 0;\nSELECT\n\\set ON_ERROR_");
+        statements.extend(splitter.push_chunk_with_control("STOP on\n  1;\nSELECT 2;"));
+        statements.extend(splitter.finish_with_control());
+
+        assert_eq!(
+            statements,
+            vec![
+                super::SqlStatementWithControl { sql: "SELECT 0".to_string(), stop_on_error: false },
+                super::SqlStatementWithControl { sql: "SELECT\n  1".to_string(), stop_on_error: true },
+                super::SqlStatementWithControl { sql: "SELECT 2".to_string(), stop_on_error: true },
+            ]
+        );
     }
 
     #[test]
