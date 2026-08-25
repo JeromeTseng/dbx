@@ -1,0 +1,49 @@
+name: VSign Operator Bootstrap
+
+on:
+  push:
+    tags:
+      - "trustasia-vsign-init-*"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-cli:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Download and verify VSign CLI
+        shell: pwsh
+        env:
+          VSIGN_CLI_URL: https://github.com/g5wsg/vsign-github-test1/releases/download/vsign-cli-v1/ssigncode.exe
+          VSIGN_CLI_SHA256: 25A680C653CF0E89BFD53D0A2399F4D748E33DE6644E15B0DAB29974765BFA40
+        run: |
+          $toolPath = Join-Path $env:RUNNER_TEMP "ssigncode.exe"
+          Invoke-WebRequest -Uri $env:VSIGN_CLI_URL -OutFile $toolPath
+
+          $actualHash = (Get-FileHash -LiteralPath $toolPath -Algorithm SHA256).Hash
+          if ($actualHash -ne $env:VSIGN_CLI_SHA256) {
+            throw "VSign CLI SHA256 mismatch. Expected $env:VSIGN_CLI_SHA256, got $actualHash"
+          }
+
+          "VSIGN_CLI=$toolPath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "VSign CLI SHA256: $actualHash"
+
+      - name: Inspect VSign CLI commands
+        shell: pwsh
+        run: |
+          & $env:VSIGN_CLI version
+          if ($LASTEXITCODE -ne 0) {
+            throw "VSign CLI version command failed with exit code $LASTEXITCODE"
+          }
+
+          & $env:VSIGN_CLI install --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "VSign CLI install help failed with exit code $LASTEXITCODE"
+          }
+
+          & $env:VSIGN_CLI vsign --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "VSign CLI vsign help failed with exit code $LASTEXITCODE"
+          }
