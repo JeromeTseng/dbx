@@ -50,6 +50,7 @@ import { mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoUrlParam, mongoUr
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { DAMENG_BUILTIN_DRIVER_PROFILE, DAMENG_CUSTOM_DRIVER_PROFILE, DAMENG_DEFAULT_JDBC_DRIVER_CLASS, damengCustomJdbcUrl, damengDriverModeForConfig, defaultDamengJdbcUrl, type DamengDriverMode } from "@/lib/database/damengDriverOptions";
 import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -2315,6 +2316,13 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.port = 0;
       form.value.connection_string = undefined;
     }
+    if (profile.type === "dameng") {
+      form.value.connection_string = undefined;
+      form.value.jdbc_driver_class = undefined;
+      form.value.jdbc_driver_paths = [];
+      jdbcDriverPathsInput.value = "";
+      jdbcManualClasspathOpen.value = false;
+    }
     if (profile.type === "jdbc") {
       form.value.host = "";
       form.value.connection_string = "";
@@ -2752,6 +2760,27 @@ function switchH2DriverProfile(profile: "h2" | "h2-v1" | "h2-v2" | "h2-v3" | "h2
   resetTestState();
 }
 
+const damengDriverMode = computed(() => damengDriverModeForConfig(form.value));
+const isDamengCustomDriver = computed(() => form.value.db_type === "dameng" && damengDriverMode.value === "custom");
+
+function setDamengDriverMode(mode: DamengDriverMode) {
+  if (mode === "builtin") {
+    form.value.driver_profile = DAMENG_BUILTIN_DRIVER_PROFILE;
+    form.value.connection_string = undefined;
+    form.value.jdbc_driver_class = undefined;
+    form.value.jdbc_driver_paths = [];
+    jdbcDriverPathsInput.value = "";
+    selectedJdbcDriverPath.value = "";
+    jdbcManualClasspathOpen.value = false;
+  } else {
+    form.value.driver_profile = DAMENG_CUSTOM_DRIVER_PROFILE;
+    form.value.connection_string = damengCustomJdbcUrl(form.value);
+    form.value.jdbc_driver_class = form.value.jdbc_driver_class?.trim() || DAMENG_DEFAULT_JDBC_DRIVER_CLASS;
+    jdbcManualClasspathOpen.value = true;
+  }
+  resetTestState();
+}
+
 function isH2FileJdbcUrlLikePath(value: string): boolean {
   return /\.(mv|h2)\.db$/i.test(value.trim()) || value.includes("/") || value.includes("\\");
 }
@@ -2856,7 +2885,7 @@ function dbCategoryForOption(value: string): DbCategoryKey | undefined {
 
 const selectedDbIcon = computed(() => iconTypeMap[selectedType.value] || selectedProfile().icon || selectedType.value);
 function supportsNativeAgentJdbcDriverConfigType(dbType: DatabaseType): boolean {
-  return dbType === "prestosql" || dbType === "bigquery";
+  return dbType === "prestosql" || dbType === "bigquery" || dbType === "dameng";
 }
 
 const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql", "bigquery"]);
@@ -2871,7 +2900,7 @@ const jdbcxHighPrivilegeExtensionsAllowed = computed({
     resetTestState();
   },
 });
-const supportsNativeAgentJdbcDriverConfig = computed(() => supportsNativeAgentJdbcDriverConfigType(form.value.db_type));
+const supportsNativeAgentJdbcDriverConfig = computed(() => supportsNativeAgentJdbcDriverConfigType(form.value.db_type) && (form.value.db_type !== "dameng" || isDamengCustomDriver.value));
 const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionMode.value === "file");
 const isH2CustomDriver = computed(() => form.value.db_type === "h2" && form.value.driver_profile === "h2-custom");
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
@@ -3940,6 +3969,22 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
+  }
+  if (config.db_type === "dameng") {
+    if (damengDriverModeForConfig(config) === "custom") {
+      config.driver_profile = DAMENG_CUSTOM_DRIVER_PROFILE;
+      config.connection_string = damengCustomJdbcUrl(config);
+      config.jdbc_driver_class = config.jdbc_driver_class?.trim() || DAMENG_DEFAULT_JDBC_DRIVER_CLASS;
+      config.jdbc_driver_paths = parsedJdbcDriverPaths();
+      if (config.jdbc_driver_paths.length === 0) {
+        throw new Error(t("connection.damengCustomDriverRequired"));
+      }
+    } else {
+      config.driver_profile = DAMENG_BUILTIN_DRIVER_PROFILE;
+      config.connection_string = undefined;
+      config.jdbc_driver_class = undefined;
+      config.jdbc_driver_paths = [];
+    }
   }
   if (jdbcBackedDatabaseTypes.has(config.db_type) || gaussdbConnectionMode(config) === "m-jdbc") {
     if (config.db_type === "jdbc") {
@@ -7131,6 +7176,26 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
+                  <div v-if="form.db_type === 'dameng'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.driverMode") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Button size="sm" :variant="damengDriverMode === 'builtin' ? 'default' : 'outline'" @click="setDamengDriverMode('builtin')">
+                        {{ t("connection.damengBuiltinDriver") }}
+                      </Button>
+                      <Button size="sm" :variant="damengDriverMode === 'custom' ? 'default' : 'outline'" @click="setDamengDriverMode('custom')">
+                        {{ t("connection.damengCustomDriver") }}
+                      </Button>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top" align="center" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("connection.damengDriverModeHint") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+
                   <!-- GaussDB: multi-host dynamic list -->
                   <template v-if="form.db_type === 'gaussdb'">
                     <div class="grid grid-cols-4 items-start gap-4">
@@ -7158,6 +7223,11 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelClass">{{ form.db_type === "elasticsearch" && elasticsearchConnectionMode === "kibana" ? t("connection.elasticsearchKibanaHost") : t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
                     <Input v-model.number="form.port" type="number" class="col-span-1" @input="markSqlServerPortExplicit" />
+                  </div>
+
+                  <div v-if="isDamengCustomDriver" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.jdbcUrl") }}</Label>
+                    <Input v-model="form.connection_string" class="col-span-3" :placeholder="defaultDamengJdbcUrl(form)" />
                   </div>
 
                   <div v-if="form.db_type === 'elasticsearch' && elasticsearchConnectionMode === 'kibana'" class="grid grid-cols-4 items-center gap-4">
@@ -7469,14 +7539,14 @@ function openExternalUrl(url: string) {
                       <span />
                       <div class="col-span-3 space-y-2">
                         <p class="text-xs text-muted-foreground">
-                          {{ t("connection.jdbcPluginHint") }}
+                          {{ form.db_type === "dameng" ? t("connection.damengCustomDriverHint") : t("connection.jdbcPluginHint") }}
                         </p>
                         <div class="flex flex-wrap gap-2">
                           <Button type="button" variant="outline" size="sm" @click="emit('openDriverStore', { target: 'tab', tab: 'jdbc' })">
                             <FolderOpen class="h-3.5 w-3.5" />
                             {{ t("toolbar.driverManager") }}
                           </Button>
-                          <Button type="button" variant="outline" size="sm" @click="openExternalUrl('https://dbxio.com')">
+                          <Button v-if="form.db_type !== 'dameng'" type="button" variant="outline" size="sm" @click="openExternalUrl('https://dbxio.com')">
                             <ExternalLink class="h-3.5 w-3.5" />
                             {{ t("connection.jdbcDocs") }}
                           </Button>
