@@ -2774,7 +2774,9 @@ function setDamengDriverMode(mode: DamengDriverMode) {
     jdbcManualClasspathOpen.value = false;
   } else {
     form.value.driver_profile = DAMENG_CUSTOM_DRIVER_PROFILE;
-    form.value.connection_string = damengCustomJdbcUrl(form.value);
+    // Do not materialize connection_string here: submit regenerates it from
+    // the live form, and freezing the URL at switch time would keep the
+    // connection on the old host/port after later edits.
     form.value.jdbc_driver_class = form.value.jdbc_driver_class?.trim() || DAMENG_DEFAULT_JDBC_DRIVER_CLASS;
     jdbcManualClasspathOpen.value = true;
   }
