@@ -3203,7 +3203,10 @@ fn column_def(col: &ColumnInfo, db_type: DatabaseType, source_dialect: Option<Di
             )
         ));
     }
-    if column_is_auto_increment(col) {
+    // Suffix-style auto-increment is only valid in MySQL-family ALTER clauses
+    // (ADD/MODIFY/CHANGE). Other dialects' identity clauses are order-sensitive
+    // inside ADD COLUMN, so keep omitting them outside the MySQL family.
+    if column_is_auto_increment(col) && profile.alter_uses_modify_column {
         if let AutoIncSyntax::Suffix(suffix) = profile.auto_inc {
             definition.push_str(suffix);
         }
@@ -7696,6 +7699,45 @@ mod tests {
         assert!(
             sql.contains("MODIFY COLUMN `id` int NOT NULL AUTO_INCREMENT COMMENT 'new comment'"),
             "MySQL MODIFY must preserve AUTO_INCREMENT: {sql}"
+        );
+    }
+
+    #[test]
+    fn mysql_add_column_keeps_auto_increment_suffix() {
+        let mut source = column("seq", "int", None);
+        source.extra = Some("auto_increment".to_string());
+        let diff = ColumnDiff {
+            diff_type: "added".to_string(),
+            name: "seq".to_string(),
+            source: Some(source),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        };
+
+        let sql = gen_sql(wrap_table_diff("users", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Mysql));
+
+        assert!(sql.contains("AUTO_INCREMENT"), "MySQL ADD COLUMN must keep AUTO_INCREMENT: {sql}");
+    }
+
+    #[test]
+    fn sqlserver_add_column_omits_identity_suffix() {
+        let mut source = column("seq", "int", None);
+        source.extra = Some("auto_increment".to_string());
+        let diff = ColumnDiff {
+            diff_type: "added".to_string(),
+            name: "seq".to_string(),
+            source: Some(source),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        };
+
+        let sql = gen_sql(wrap_table_diff("users", vec![diff]), DatabaseType::SqlServer, Some(DialectKind::Mysql));
+
+        assert!(
+            !sql.to_uppercase().contains("IDENTITY("),
+            "SQL Server ADD COLUMN must not append an order-sensitive IDENTITY clause: {sql}"
         );
     }
 
