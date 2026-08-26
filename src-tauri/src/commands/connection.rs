@@ -1210,7 +1210,10 @@ async fn test_connection_with_info_inner(
             },
             DatabaseType::Sqlite => {
                 match connect_sqlite_from_config_with_state(Some(state.as_ref()), connection_id, &config).await {
-                    Ok(_) => Ok("Connection successful".to_string()),
+                    Ok(pool) => {
+                        pool.shutdown().await;
+                        Ok("Connection successful".to_string())
+                    }
                     Err(e) => Err(e),
                 }
             }

@@ -42,12 +42,20 @@ pub fn sqlite_ssh_worker_requested(config: &ConnectionConfig) -> bool {
     config.db_type == DatabaseType::Sqlite && config.has_effective_ssh_tunnels()
 }
 
-pub fn sqlite_worker_placement(config: &ConnectionConfig) -> SqliteWorkerPlacement {
+fn sqlite_worker_placement(config: &ConnectionConfig) -> SqliteWorkerPlacement {
     match url_param(config.url_params.as_deref(), "dbx_sqlite_worker").as_deref() {
         Some("persist") => SqliteWorkerPlacement::Persist,
         Some("preplaced") => SqliteWorkerPlacement::Preplaced,
         _ => SqliteWorkerPlacement::Session,
     }
+}
+
+fn removes_remote_worker_on_disconnect(placement: SqliteWorkerPlacement) -> bool {
+    matches!(placement, SqliteWorkerPlacement::Session)
+}
+
+fn session_worker_path(connection_id: &str, digest: &str) -> String {
+    format!("{DEFAULT_PERSIST_DIR}/session-{connection_id}-{digest}")
 }
 
 pub fn sqlite_worker_remote_path(config: &ConnectionConfig) -> String {
@@ -70,6 +78,9 @@ type DynStream = Pin<Box<dyn WorkerStream>>;
 pub struct SqliteWorkerClient {
     io: AsyncMutex<WorkerIo>,
     next_id: AtomicU64,
+    ssh_session: Option<Arc<Handle<SshClient>>>,
+    /// Session placement only: delete this uploaded file after the worker exits.
+    remove_remote_path: Option<String>,
 }
 
 enum WorkerIo {
@@ -80,9 +91,9 @@ enum WorkerIo {
         stdout: BufReader<tokio::process::ChildStdout>,
     },
     Ssh {
-        session: Arc<Handle<SshClient>>,
         stream: DynStream,
     },
+    Closed,
 }
 
 impl SqliteWorkerClient {
@@ -146,10 +157,38 @@ impl SqliteWorkerClient {
     }
 
     async fn ssh_session(&self) -> Result<Arc<Handle<SshClient>>, String> {
-        match &*self.io.lock().await {
-            WorkerIo::Ssh { session, .. } => Ok(Arc::clone(session)),
-            WorkerIo::Process { .. } => Err("SQLite worker file transfer requires an SSH session".to_string()),
+        self.ssh_session.clone().ok_or_else(|| "SQLite worker file transfer requires an SSH session".to_string())
+    }
+
+    pub async fn shutdown(&self) {
+        self.close_io().await;
+        self.remove_uploaded_session_worker_best_effort().await;
+    }
+
+    async fn close_io(&self) {
+        let previous = {
+            let mut io = self.io.lock().await;
+            std::mem::replace(&mut *io, WorkerIo::Closed)
+        };
+        match previous {
+            WorkerIo::Ssh { mut stream } => {
+                let _ = stream.shutdown().await;
+            }
+            WorkerIo::Process { mut child, .. } => {
+                let _ = child.start_kill();
+            }
+            WorkerIo::Closed => {}
         }
+    }
+
+    async fn remove_uploaded_session_worker_best_effort(&self) {
+        let Some(path) = self.remove_remote_path.as_deref() else {
+            return;
+        };
+        let Some(session) = self.ssh_session.as_ref() else {
+            return;
+        };
+        remove_uploaded_session_worker(session.as_ref(), path).await;
     }
 
     async fn open_database(&self, path: &str) -> Result<(), String> {
@@ -172,6 +211,7 @@ impl SqliteWorkerClient {
                 stdout.read_line(&mut line).await.map_err(|e| e.to_string())?;
                 parse_response(id, &line)
             }
+            WorkerIo::Closed => return Err("SQLite worker session is closed".to_string()),
             WorkerIo::Ssh { stream, .. } => {
                 stream.write_all(&encoded).await.map_err(|e| e.to_string())?;
                 stream.flush().await.map_err(|e| e.to_string())?;
@@ -199,9 +239,24 @@ impl SqliteWorkerClient {
 impl Drop for SqliteWorkerClient {
     fn drop(&mut self) {
         if let Ok(mut io) = self.io.try_lock() {
-            if let WorkerIo::Process { child, .. } = &mut *io {
-                let _ = child.start_kill();
+            match std::mem::replace(&mut *io, WorkerIo::Closed) {
+                WorkerIo::Process { mut child, .. } => {
+                    let _ = child.start_kill();
+                }
+                WorkerIo::Ssh { stream } => drop(stream),
+                WorkerIo::Closed => {}
             }
+        }
+        let Some(path) = self.remove_remote_path.take() else {
+            return;
+        };
+        let Some(session) = self.ssh_session.take() else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                remove_uploaded_session_worker(session.as_ref(), &path).await;
+            });
         }
     }
 }
@@ -246,6 +301,7 @@ pub async fn connect_sqlite_worker(
     validate_remote_path(db_path)?;
 
     let placement = sqlite_worker_placement(config);
+    let remove_remote_on_close = removes_remote_worker_on_disconnect(placement);
     let configured_path = sqlite_worker_remote_path(config);
     let session = open_final_hop_session(tunnels, connection_id, &hops).await?;
     let remote_home = ssh_capture(&session, "printf %s \"$HOME\"").await?;
@@ -284,29 +340,41 @@ pub async fn connect_sqlite_worker(
             };
             expand_home(&path)
         }
-        SqliteWorkerPlacement::Session => {
-            expand_home(&format!("{DEFAULT_PERSIST_DIR}/session-{connection_id}-{digest}"))
-        }
+        SqliteWorkerPlacement::Session => expand_home(&session_worker_path(connection_id, &digest)),
     };
 
     if placement != SqliteWorkerPlacement::Preplaced {
         ensure_worker_consent(data_dir, &identity, &remote_path, &digest).await?;
         upload_worker(&session, &remote_path, &local_worker.bytes).await?;
     }
-    verify_remote_digest(&session, &remote_path, &digest).await?;
 
-    let channel = session.channel_open_session().await.map_err(|e| format!("SSH session channel failed: {e}"))?;
-    channel
-        .exec(true, format!("exec {}", shell_quote(&remote_path)))
-        .await
-        .map_err(|e| format!("failed to start SQLite worker: {e}"))?;
-    let stream: DynStream = Box::pin(channel.into_stream());
-    let client = SqliteWorkerClient {
-        io: AsyncMutex::new(WorkerIo::Ssh { session: Arc::new(session), stream }),
-        next_id: AtomicU64::new(1),
+    let session = Arc::new(session);
+    let start_worker = async {
+        verify_remote_digest(session.as_ref(), &remote_path, &digest).await?;
+        let channel = session.channel_open_session().await.map_err(|e| format!("SSH session channel failed: {e}"))?;
+        channel
+            .exec(true, format!("exec {}", shell_quote(&remote_path)))
+            .await
+            .map_err(|e| format!("failed to start SQLite worker: {e}"))?;
+        let stream: DynStream = Box::pin(channel.into_stream());
+        let client = SqliteWorkerClient {
+            io: AsyncMutex::new(WorkerIo::Ssh { stream }),
+            next_id: AtomicU64::new(1),
+            ssh_session: Some(Arc::clone(&session)),
+            remove_remote_path: remove_remote_on_close.then(|| remote_path.clone()),
+        };
+        client.open_database(&expand_home(db_path)).await?;
+        Ok(client)
     };
-    client.open_database(&expand_home(db_path)).await?;
-    Ok(Arc::new(client))
+    match start_worker.await {
+        Ok(client) => Ok(Arc::new(client)),
+        Err(error) => {
+            if remove_remote_on_close {
+                remove_uploaded_session_worker(session.as_ref(), &remote_path).await;
+            }
+            Err(error)
+        }
+    }
 }
 
 struct LocalWorker {
@@ -503,6 +571,39 @@ async fn ssh_remove_file(session: &Handle<SshClient>, path: &str) -> Result<(), 
     Ok(())
 }
 
+fn empty_cache_dirs_to_remove(worker_path: &str) -> Vec<String> {
+    let path = Path::new(worker_path.trim_end_matches('/'));
+    let Some(sqlite_worker_dir) = path.parent() else {
+        return Vec::new();
+    };
+    if sqlite_worker_dir.file_name().is_none_or(|name| name != "sqlite-worker") {
+        return Vec::new();
+    }
+    let mut dirs = vec![sqlite_worker_dir.to_string_lossy().into_owned()];
+    if let Some(dbx_dir) = sqlite_worker_dir.parent() {
+        if dbx_dir.file_name().is_some_and(|name| name == "dbx") {
+            dirs.push(dbx_dir.to_string_lossy().into_owned());
+        }
+    }
+    dirs
+}
+
+fn remove_session_worker_command(path: &str) -> String {
+    let mut command = format!("rm -f {}", shell_quote(path));
+    for dir in empty_cache_dirs_to_remove(path) {
+        command.push_str("; rmdir ");
+        command.push_str(&shell_quote(&dir));
+        command.push_str(" 2>/dev/null");
+    }
+    command
+}
+
+async fn remove_uploaded_session_worker(session: &Handle<SshClient>, path: &str) {
+    if let Err(err) = ssh_capture(session, &remove_session_worker_command(path)).await {
+        log::warn!("Failed to remove session SQLite worker at {path}: {err}");
+    }
+}
+
 async fn upload_worker(session: &Handle<SshClient>, dest: &str, bytes: &[u8]) -> Result<(), String> {
     let quoted = shell_quote(dest);
     let command =
@@ -578,6 +679,21 @@ mod tests {
         config.url_params = Some("dbx_sqlite_worker=preplaced&dbx_sqlite_worker_path=%2Fopt%2Fworker".into());
         assert_eq!(sqlite_worker_placement(&config), SqliteWorkerPlacement::Preplaced);
         assert_eq!(sqlite_worker_remote_path(&config), "/opt/worker");
+    }
+
+    #[test]
+    fn session_placement_removes_worker_on_disconnect() {
+        assert!(removes_remote_worker_on_disconnect(SqliteWorkerPlacement::Session));
+        assert!(!removes_remote_worker_on_disconnect(SqliteWorkerPlacement::Persist));
+        assert!(!removes_remote_worker_on_disconnect(SqliteWorkerPlacement::Preplaced));
+        assert_eq!(session_worker_path("conn-1", "abc123"), "~/.cache/dbx/sqlite-worker/session-conn-1-abc123");
+        assert_eq!(
+            empty_cache_dirs_to_remove("/home/u/.cache/dbx/sqlite-worker/session-conn-1-abc123"),
+            vec!["/home/u/.cache/dbx/sqlite-worker".to_string(), "/home/u/.cache/dbx".to_string()]
+        );
+        assert!(empty_cache_dirs_to_remove("/opt/dbx/dbx-sqlite-worker").is_empty());
+        assert!(remove_session_worker_command("/home/u/.cache/dbx/sqlite-worker/session-conn-1-abc123")
+            .contains("rmdir '/home/u/.cache/dbx/sqlite-worker' 2>/dev/null; rmdir '/home/u/.cache/dbx' 2>/dev/null"));
     }
 
     #[test]

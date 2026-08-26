@@ -5323,7 +5323,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             let _ = p.disconnect().await;
         }
         PoolKind::Postgres(p) => p.close(),
-        PoolKind::Sqlite(_) => {}
+        PoolKind::Sqlite(pool) => {
+            pool.shutdown().await;
+        }
         PoolKind::Rqlite(_) => {}
         PoolKind::Turso(_) => {}
         PoolKind::CloudflareD1(_) => {}

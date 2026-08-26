@@ -1079,7 +1079,7 @@ export default {
     sqliteRemotePathPlaceholder: "/var/lib/app/data.db",
     sqliteRemotePathHint: "Enter an absolute path on the final SSH hop. Local file pickers are disabled because the SQLite file is not on this computer.",
     sqliteWorkerPlacement: "SQLite worker",
-    sqliteWorkerPlacementSession: "Session — upload for this connection, then leave the file until the next connect overwrites it",
+    sqliteWorkerPlacementSession: "Session — upload for this connection, then delete the remote file on disconnect",
     sqliteWorkerPlacementPersist: "Persist — leave the worker on the file host after disconnect",
     sqliteWorkerPlacementPreplaced: "Pre-placed — execute an existing worker path, never upload or delete it",
     sqliteWorkerPersistPathPlaceholder: "~/.cache/dbx/sqlite-worker/<digest>",

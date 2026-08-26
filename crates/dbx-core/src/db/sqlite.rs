@@ -46,6 +46,12 @@ impl SqliteHandle {
         self.worker.clone()
     }
 
+    pub async fn shutdown(&self) {
+        if let Some(worker) = &self.worker {
+            worker.shutdown().await;
+        }
+    }
+
     pub fn with_connection<T, F>(&self, f: F) -> Result<T, String>
     where
         F: FnOnce(&mut Connection) -> Result<T, String>,

@@ -1006,7 +1006,7 @@ export default withEnglishFallback({
     sqliteRemotePathPlaceholder: "/var/lib/app/data.db",
     sqliteRemotePathHint: "请填写最后一跳 SSH 主机上的绝对路径。文件在那台机器上，因此本地文件选择器已禁用。",
     sqliteWorkerPlacement: "SQLite worker",
-    sqliteWorkerPlacementSession: "会话 — 为本连接上传，下次连接会覆盖同一文件",
+    sqliteWorkerPlacementSession: "会话 — 为本连接上传，断开后删除远端文件",
     sqliteWorkerPlacementPersist: "持久 — 断开后仍保留文件主机上的 worker",
     sqliteWorkerPlacementPreplaced: "预放置 — 只执行已有路径，不上传也不删除",
     sqliteWorkerPersistPathPlaceholder: "~/.cache/dbx/sqlite-worker/<digest>",
