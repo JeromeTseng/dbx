@@ -3835,6 +3835,7 @@ async function applyPendingAiConfigDeepLinkDraft() {
   aiEnterEditMode();
   aiEditConfigName.value = draft.name;
   aiEditProvider.value = draft.provider;
+  aiEditProviderPresetId.value = getAiProviderPresetId(draft.provider, draft.endpoint);
   aiEditApiKey.value = "";
   aiEditAuthMethod.value = draft.authMethod;
   aiEditEndpoint.value = draft.endpoint;
