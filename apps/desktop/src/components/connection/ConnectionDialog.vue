@@ -3121,7 +3121,11 @@ const sqliteWorkerPath = computed({
     form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker_path", value);
   },
 });
-const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile, { ssh: sqliteUsesSsh.value }));
+const shouldShowSqliteSshWorkerInstallHint = computed(() => form.value.db_type === "sqlite" && sqliteUsesSsh.value && showAgentDriverInstallHint("sqlite", agentDrivers.value, form.value.driver_profile, { ssh: true }));
+const shouldShowAgentDriverInstallHint = computed(() => {
+  if (form.value.db_type === "sqlite" && sqliteUsesSsh.value) return false;
+  return showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile, { ssh: sqliteUsesSsh.value });
+});
 const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", driver: agentDriverInstallKey(form.value.db_type, form.value.driver_profile, { ssh: sqliteUsesSsh.value }) }));
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const canChooseVisibleNacosNamespaces = computed(() => form.value.db_type === "nacos");
@@ -6180,7 +6184,7 @@ function openExternalUrl(url: string) {
                       </label>
                       <Input v-if="sqliteWorkerPlacement !== 'session'" v-model="sqliteWorkerPath" :placeholder="sqliteWorkerPlacement === 'persist' ? t('connection.sqliteWorkerPersistPathPlaceholder') : t('connection.sqliteWorkerPreplacedPathPlaceholder')" />
                       <p class="text-xs text-muted-foreground">{{ t("connection.sqliteWorkerPlacementHint") }}</p>
-                      <p v-if="shouldShowAgentDriverInstallHint" class="text-xs text-muted-foreground">
+                      <p v-if="shouldShowSqliteSshWorkerInstallHint" class="text-xs text-muted-foreground">
                         {{ t("connection.driverInstallHintPrefix") }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore', agentDriverFocus)">{{ t("toolbar.driverManager") }}</a
                         >{{ t("connection.driverInstallHintSuffix") }}
                       </p>

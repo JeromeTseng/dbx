@@ -9,6 +9,7 @@ publish = false
 [[bin]]
 name = "dbx-sqlite-worker"
 path = "src/main.rs"
+required-features = ["runtime"]
 
 [features]
 default = ["runtime"]
