@@ -107,6 +107,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private String connectedUsername;
     private Driver externalDriver;
     private URLClassLoader externalDriverLoader;
+    private List<URL> externalDriverUrls;
+    private String externalDriverClass;
     private volatile boolean legacyJdbcMetadata;
     private volatile boolean dbmsOutputInitializationSupported = true;
     private final Map<Object, Boolean> dbmsOutputInitializedConnections =
@@ -125,8 +127,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
     @Override
     protected void loadDriver(ConnectParams params) throws Exception {
         withSuppressedStdout(() -> {
-            closeExternalDriverLoader();
             if (params.getJdbc_driver_paths() == null || params.getJdbc_driver_paths().isEmpty()) {
+                // Keep an existing external loader open: pooled connections may
+                // still hold classes loaded from it. Only stop using it here.
+                externalDriver = null;
                 super.loadDriver(params);
                 return;
             }
@@ -139,10 +143,27 @@ public final class DamengAgent extends AbstractJdbcAgent {
             if (driverClass == null || driverClass.trim().isEmpty()) {
                 driverClass = driverClass();
             }
+            // Reuse the loader for unchanged paths and class: recreating it
+            // would strand classes that live pooled connections still need
+            // (lazy driver classes would fail with NoClassDefFoundError). A
+            // loader dropped for changed paths is never closed here for the
+            // same reason; disconnect() releases the active one.
+            if (externalDriverLoader != null
+                && urls.equals(externalDriverUrls)
+                && driverClass.equals(externalDriverClass)) {
+                if (externalDriver == null) {
+                    externalDriver = (Driver) Class.forName(driverClass, true, externalDriverLoader)
+                        .getDeclaredConstructor()
+                        .newInstance();
+                }
+                return;
+            }
             externalDriverLoader = new URLClassLoader(
                 urls.toArray(new URL[0]),
                 ClassLoader.getPlatformClassLoader()
             );
+            externalDriverUrls = urls;
+            externalDriverClass = driverClass;
             externalDriver = (Driver) Class.forName(driverClass, true, externalDriverLoader)
                 .getDeclaredConstructor()
                 .newInstance();
@@ -175,8 +196,20 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return "SELECT 1";
     }
 
+    @Override
+    public synchronized void disconnect() {
+        super.disconnect();
+        try {
+            closeExternalDriverLoader();
+        } catch (Exception error) {
+            // Best-effort release during teardown.
+        }
+    }
+
     private void closeExternalDriverLoader() throws Exception {
         externalDriver = null;
+        externalDriverUrls = null;
+        externalDriverClass = null;
         if (externalDriverLoader != null) {
             externalDriverLoader.close();
             externalDriverLoader = null;
