@@ -25,6 +25,7 @@
   "oceanbase-oracle": "0.1.45",
   "oracle": "0.1.54",
   "snowflake": "0.1.48",
+  "sqlite-worker": "0.1.0",
   "spanner": "0.1.1",
   "saphana": "0.1.43",
   "sundb": "0.1.48",

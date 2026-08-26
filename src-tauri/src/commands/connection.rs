@@ -1034,9 +1034,14 @@ async fn connect_sqlite_from_config_with_state(
     if db::sqlite_worker::sqlite_ssh_worker_requested(config) {
         let state =
             state.ok_or_else(|| "Remote SQLite over SSH is only available in the DBX Desktop app".to_string())?;
-        let worker =
-            db::sqlite_worker::connect_sqlite_worker(&state.tunnels, state.storage.data_dir(), connection_id, config)
-                .await?;
+        let worker = db::sqlite_worker::connect_sqlite_worker(
+            &state.tunnels,
+            &state.agent_manager,
+            state.storage.data_dir(),
+            connection_id,
+            config,
+        )
+        .await?;
         return Ok(db::sqlite::SqliteHandle::from_worker(worker));
     }
 

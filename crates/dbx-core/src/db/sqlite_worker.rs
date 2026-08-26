@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dbx_sqlite_worker::{WorkerBody, WorkerOp, WorkerRequest, WorkerResponse};
@@ -12,34 +12,23 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::agent_manager::{AgentManager, SQLITE_WORKER_DRIVER_KEY};
 use crate::db::ssh_prompt::{self, SshPromptAnswer, SshPromptKind, SshPromptRequest};
 use crate::db::ssh_tunnel::{self, SshClient, TunnelManager};
 use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
 use crate::types::QueryResult;
-use crate::{download_candidate_urls, CNB_RELEASE_DOWNLOAD_PREFIX, GITHUB_RELEASE_DOWNLOAD_PREFIX};
 
 const WORKER_PATH_ENV: &str = "DBX_SQLITE_WORKER_PATH";
 const DEFAULT_PERSIST_DIR: &str = "~/.cache/dbx/sqlite-worker";
 const CONSENT_FILE_NAME: &str = "sqlite-worker-consent.json";
 static SQLITE_SSH_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(false);
-static SQLITE_SSH_APP_VERSION: Mutex<String> = Mutex::new(String::new());
 
-pub fn enable_sqlite_ssh_runtime(app_version: impl Into<String>) {
+pub fn enable_sqlite_ssh_runtime(_app_version: impl Into<String>) {
     SQLITE_SSH_RUNTIME_ENABLED.store(true, Ordering::SeqCst);
-    *SQLITE_SSH_APP_VERSION.lock().expect("sqlite ssh app version lock") = app_version.into();
 }
 
 pub fn sqlite_ssh_runtime_enabled() -> bool {
     SQLITE_SSH_RUNTIME_ENABLED.load(Ordering::SeqCst)
-}
-
-fn runtime_app_version() -> String {
-    let version = SQLITE_SSH_APP_VERSION.lock().expect("sqlite ssh app version lock");
-    if version.is_empty() {
-        env!("CARGO_PKG_VERSION").to_string()
-    } else {
-        version.clone()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +217,7 @@ fn parse_response(id: u64, line: &str) -> Result<WorkerBody, String> {
 
 pub async fn connect_sqlite_worker(
     tunnels: &TunnelManager,
+    agent_manager: &AgentManager,
     data_dir: &Path,
     connection_id: &str,
     config: &ConnectionConfig,
@@ -269,8 +259,11 @@ pub async fn connect_sqlite_worker(
         }
     };
 
-    let arch = remote_linux_arch(&session).await?;
-    let local_worker = resolve_local_worker(data_dir, &runtime_app_version(), &arch).await?;
+    let platform = remote_linux_platform(&session).await?;
+    if std::env::var_os(WORKER_PATH_ENV).is_none() && !agent_manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY) {
+        crate::agent_service::ensure_sqlite_worker_driver_ready(agent_manager).await?;
+    }
+    let local_worker = resolve_local_worker(agent_manager, &platform).await?;
     let digest = local_worker.digest.clone();
     let identity = hop_identity(hops.last().ok_or("SSH hop list is empty")?);
 
@@ -321,48 +314,19 @@ struct LocalWorker {
     digest: String,
 }
 
-async fn resolve_local_worker(data_dir: &Path, app_version: &str, arch: &str) -> Result<LocalWorker, String> {
+async fn resolve_local_worker(agent_manager: &AgentManager, platform: &str) -> Result<LocalWorker, String> {
     if let Ok(path) = std::env::var(WORKER_PATH_ENV) {
         let bytes = tokio::fs::read(&path).await.map_err(|e| format!("failed to read {WORKER_PATH_ENV}: {e}"))?;
         return Ok(LocalWorker { digest: sha256_hex(&bytes), bytes });
     }
-    let cache_dir = data_dir.join("sqlite-worker");
-    tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| e.to_string())?;
-    let artifact = format!("dbx-sqlite-worker-linux-{arch}");
-    let cache_path = cache_dir.join(&artifact);
-    if cache_path.is_file() {
-        let bytes = tokio::fs::read(&cache_path).await.map_err(|e| e.to_string())?;
+    let path = agent_manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, platform);
+    if path.is_file() {
+        let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
         return Ok(LocalWorker { digest: sha256_hex(&bytes), bytes });
     }
-    let tag = if app_version.starts_with('v') { app_version.to_string() } else { format!("v{app_version}") };
-    let github = format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}{tag}/{artifact}");
-    let r2_path = format!("releases/{tag}/{artifact}");
-    let mut urls = download_candidate_urls(&github, &r2_path);
-    urls.push(format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{tag}/{artifact}"));
-    let mut last_error = "no download URL".to_string();
-    for url in urls {
-        match download_worker(&url).await {
-            Ok(bytes) => {
-                if bytes.len() as u64 > 5 * 1024 * 1024 {
-                    return Err("Downloaded SQLite worker exceeds the 5 MiB budget".to_string());
-                }
-                tokio::fs::write(&cache_path, &bytes).await.map_err(|e| e.to_string())?;
-                return Ok(LocalWorker { digest: sha256_hex(&bytes), bytes });
-            }
-            Err(error) => last_error = error,
-        }
-    }
     Err(format!(
-        "Could not fetch the SQLite worker for this DBX version ({last_error}). Set {WORKER_PATH_ENV} or use a pre-placed worker path."
+        "{SQLITE_WORKER_DRIVER_KEY} driver is not installed. Please install it from the Driver Manager or set {WORKER_PATH_ENV}."
     ))
-}
-
-async fn download_worker(url: &str) -> Result<Vec<u8>, String> {
-    let response = reqwest::get(url).await.map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url} returned {}", response.status()));
-    }
-    response.bytes().await.map(|bytes| bytes.to_vec()).map_err(|e| e.to_string())
 }
 
 async fn ensure_worker_consent(data_dir: &Path, identity: &str, dest: &str, digest: &str) -> Result<(), String> {
@@ -470,11 +434,14 @@ async fn open_final_hop_session(
     .await
 }
 
-async fn remote_linux_arch(session: &Handle<SshClient>) -> Result<String, String> {
-    let machine = ssh_capture(session, "uname -m").await?;
-    match machine.trim() {
-        "x86_64" | "amd64" => Ok("amd64".to_string()),
-        "aarch64" | "arm64" => Ok("arm64".to_string()),
+async fn remote_linux_platform(session: &Handle<SshClient>) -> Result<String, String> {
+    linux_platform_from_uname(ssh_capture(session, "uname -m").await?.trim())
+}
+
+fn linux_platform_from_uname(machine: &str) -> Result<String, String> {
+    match machine {
+        "x86_64" | "amd64" => Ok("linux-x64".to_string()),
+        "aarch64" | "arm64" => Ok("linux-aarch64".to_string()),
         other => Err(format!("Remote SQLite over SSH supports Linux amd64/arm64 only, found {other}")),
     }
 }
@@ -611,6 +578,15 @@ mod tests {
         config.url_params = Some("dbx_sqlite_worker=preplaced&dbx_sqlite_worker_path=%2Fopt%2Fworker".into());
         assert_eq!(sqlite_worker_placement(&config), SqliteWorkerPlacement::Preplaced);
         assert_eq!(sqlite_worker_remote_path(&config), "/opt/worker");
+    }
+
+    #[test]
+    fn maps_remote_uname_to_agent_linux_platforms() {
+        assert_eq!(linux_platform_from_uname("x86_64").unwrap(), "linux-x64");
+        assert_eq!(linux_platform_from_uname("amd64").unwrap(), "linux-x64");
+        assert_eq!(linux_platform_from_uname("aarch64").unwrap(), "linux-aarch64");
+        assert_eq!(linux_platform_from_uname("arm64").unwrap(), "linux-aarch64");
+        assert!(linux_platform_from_uname("ppc64le").unwrap_err().contains("ppc64le"));
     }
 
     #[test]

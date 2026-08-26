@@ -2116,6 +2116,7 @@ impl AppState {
                 if db::sqlite_worker::sqlite_ssh_worker_requested(&db_config) {
                     let worker = db::sqlite_worker::connect_sqlite_worker(
                         &self.tunnels,
+                        &self.agent_manager,
                         self.storage.data_dir(),
                         connection_id,
                         &db_config,
