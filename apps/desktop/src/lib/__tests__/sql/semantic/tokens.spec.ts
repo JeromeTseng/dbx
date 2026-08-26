@@ -21,6 +21,14 @@ describe("sqlSemanticTokens", () => {
     expect(isSuppressedSqlSemanticContext(tokens, "select * from users".length)).toBe(false);
   });
 
+  it("records whether quoted tokens have a closing delimiter", () => {
+    const complete = tokenizeSqlSemantic("select 'value'").find((token) => token.kind === "string");
+    const incomplete = tokenizeSqlSemantic("select '''").find((token) => token.kind === "string");
+
+    expect(complete?.closed).toBe(true);
+    expect(incomplete?.closed).toBe(false);
+  });
+
   it("handles hash tokens according to the SQL dialect", () => {
     const sqlServerSql = "SELECT * FROM #temp; SELECT * FROM ##global_temp; SELECT * FROM tempdb..#temp";
     const sqlServerTokens = tokenizeSqlSemantic(sqlServerSql, "sqlserver");

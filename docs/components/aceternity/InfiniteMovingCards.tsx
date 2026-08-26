@@ -20,7 +20,7 @@ export function InfiniteMovingCards({ items, direction = "left", speed = "normal
         {repeatedItems.map((item, index) => (
           <figure aria-hidden={index >= items.length} className="landing-testimonial-card flex-[0_0_340px] min-h-[188px] rounded-[9px] m-0 p-[22px] max-[760px]:flex-[0_0_286px] max-[760px]:min-h-[210px] max-[760px]:p-[18px]" key={`${item.name}-${index}`}>
             <div className="flex gap-3 items-center">
-              <img className="w-[42px] h-[42px] shrink-0 border border-[rgba(178,200,230,0.18)] rounded-full bg-[rgba(255,255,255,0.04)] object-cover" src={item.avatar} alt="" width={42} height={42} loading="lazy" decoding="async" />
+              <img className="w-[42px] h-[42px] shrink-0 border border-[rgba(184,187,193,0.18)] rounded-full bg-[rgba(255,255,255,0.04)] object-cover" src={item.avatar} alt="" width={42} height={42} loading="lazy" decoding="async" />
               <figcaption>
                 <strong className="block text-landing-ink text-[15px] font-[740] leading-[1.25]">{item.name}</strong>
                 <span className="block mt-[3px] text-landing-muted text-xs leading-[1.35]">{item.role}</span>

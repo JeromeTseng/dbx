@@ -36,6 +36,42 @@ describe("sqlFormatter", () => {
     expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
   });
 
+  it("maps only Oracle to the PL/SQL formatter dialect", () => {
+    expect(sqlFormatDialectForDbType("oracle")).toBe("oracle");
+    expect(sqlFormatDialectForDbType("oceanbase-oracle")).toBe("generic");
+  });
+
+  it("keeps issue #7138 Oracle hierarchy clauses intact", async () => {
+    const sql = "SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM IN ('16','17','18','19') CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;";
+
+    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(`SELECT
+  ctt.U_DM
+FROM
+  cte_test ctt
+START WITH ctt.SU_DM IN ('16', '17', '18', '19')
+CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;`);
+  });
+
+  it("formats valid Oracle hierarchy clauses with the same alias", async () => {
+    const sql = "SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM = '16' CONNECT BY PRIOR ctt.U_DM = ctt.SU_DM;";
+
+    const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"));
+
+    expect(formatted).toContain("FROM\n  cte_test ctt\nSTART WITH ctt.SU_DM = '16'");
+    expect(formatted).toContain("\nCONNECT BY PRIOR ctt.U_DM = ctt.SU_DM;");
+  });
+
+  it("formats ordinary Oracle SQL and anonymous PL/SQL", async () => {
+    await expect(formatSqlForEditing("select employee_id from employees where department_id = 10;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("SELECT\n  employee_id\nFROM\n  employees\nWHERE\n  department_id = 10;");
+    await expect(formatSqlForEditing("declare v_count number := 1; begin v_count := v_count + 1; end;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("DECLARE v_count number := 1;\n\nBEGIN v_count := v_count + 1;\n\nEND;");
+  });
+
+  it("keeps incomplete Oracle editor SQL unchanged", async () => {
+    const sql = "select *\nfrom dbname.\n;";
+
+    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(sql);
+  });
+
   it("keeps DuckDB prefix aliases out of formatted named parameters", async () => {
     const cases = [
       ["select 日期:date(订单日期) from 订单;", []],
@@ -124,6 +160,42 @@ OR inside$$ as note
     expect(formatted).toContain("x -> dictGet");
     expect(formatted).not.toContain("- >");
   });
+
+  it("preserves the ClickHouse table alias from issue #7079", async () => {
+    const formatted = await formatSqlText("SELECT *\nFROM MATERIAL m\nLIMIT 100;", sqlFormatDialectForDbType("clickhouse"));
+
+    expect(formatted).toBe("SELECT\n  *\nFROM\n  MATERIAL m\nLIMIT\n  100;");
+  });
+
+  it.each(["d", "dd", "h", "hh", "m", "mcs", "mi", "mm", "ms", "n", "ns", "q", "qq", "s", "ss", "wk", "ww", "yy", "yyyy"])("preserves ClickHouse identifier-like date part %s while formatting keywords", async (identifier) => {
+    const formatted = await formatSqlText(`select ${identifier}, t.${identifier} from material ${identifier} limit 100;`, sqlFormatDialectForDbType("clickhouse"));
+
+    expect(formatted).toContain(`  ${identifier},`);
+    expect(formatted).toContain(`material ${identifier}`);
+    expect(formatted).toContain("SELECT");
+    expect(formatted).toContain("FROM");
+    expect(formatted).toContain("LIMIT");
+  });
+
+  it("keeps ClickHouse identifier casing independent from keyword casing", async () => {
+    const sql = "SELECT * FROM MATERIAL M LIMIT 100;";
+
+    const lowerKeywords = await formatSqlText(sql, sqlFormatDialectForDbType("clickhouse"), { keywordCase: "lower", identifierCase: "preserve" });
+    const lowerIdentifiers = await formatSqlText(sql, sqlFormatDialectForDbType("clickhouse"), { keywordCase: "upper", identifierCase: "lower" });
+
+    expect(lowerKeywords).toContain("from\n  MATERIAL M");
+    expect(lowerKeywords).toContain("limit\n  100");
+    expect(lowerIdentifiers).toContain("FROM\n  material m");
+    expect(lowerIdentifiers).toContain("LIMIT\n  100");
+  });
+
+  it("still formats unambiguous ClickHouse interval keywords", async () => {
+    const formatted = await formatSqlText("select now() + interval 1 minutes from source_table m;", sqlFormatDialectForDbType("clickhouse"));
+
+    expect(formatted).toContain("INTERVAL 1 MINUTES");
+    expect(formatted).toContain("FROM\n  source_table m");
+  });
+
   it("preserves DBX brace placeholders in generic and MySQL SQL", async () => {
     const sql = "SELECT ${x} AS shell_value, #{x} AS mybatis_value, '${date}' AS quoted_value";
 

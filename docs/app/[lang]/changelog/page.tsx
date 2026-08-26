@@ -36,7 +36,7 @@ export default async function ChangelogPage({ params }: { params: Promise<{ lang
   const initialData = await fetchChangelog(l);
 
   return (
-    <main className="min-h-screen bg-[#0b1120] text-landing-ink">
+    <main className="min-h-screen bg-[#08080a] text-landing-ink">
       <LandingNav lang={l} active="changelog" />
 
       <div className="max-w-[860px] mx-auto px-6 pt-32 pb-4 max-[760px]:px-[18px] max-[760px]:pt-28">

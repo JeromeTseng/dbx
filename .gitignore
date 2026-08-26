@@ -49,6 +49,7 @@ Thumbs.db
 
 # GitHub (keep workflows)
 .github/*
+!.github/CODEOWNERS
 !.github/workflows/
 !.github/scripts/
 !.github/ISSUE_TEMPLATE/
@@ -60,6 +61,11 @@ Thumbs.db
 
 # Temp
 tmp/
+
+# AI background-run dev artifacts (never commit)
+.dlp-quarantine/
+outputs/
+target-ai-write-confirmation/
 
 # Code review tool artifacts
 review_diff.json

@@ -2583,6 +2583,105 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listIndexesReturnsPrimaryAndUniqueIndexes() throws Exception {
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "DROP TABLE IF EXISTS codex_jdbc_indexes"
+            }
+            """.formatted(CONNECTION));
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE TABLE codex_jdbc_indexes (id INT CONSTRAINT codex_jdbc_indexes_pk PRIMARY KEY, code VARCHAR(32), CONSTRAINT codex_jdbc_indexes_code_uq UNIQUE(code))"
+            }
+            """.formatted(CONNECTION));
+
+        JsonNode response = request("listIndexes", """
+            {
+              "connection": %s,
+              "schema": "PUBLIC",
+              "table": "CODEX_JDBC_INDEXES"
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(response.has("error"), response.toString());
+        JsonNode indexes = response.path("result");
+        JsonNode primary = findByName(indexes, "CODEX_JDBC_INDEXES_PK_INDEX_4");
+        if (primary == null) {
+            primary = findIndexByColumn(indexes, "ID");
+        }
+        JsonNode unique = findByName(indexes, "CODEX_JDBC_INDEXES_CODE_UQ_INDEX_4");
+        if (unique == null) {
+            unique = findIndexByColumn(indexes, "CODE");
+        }
+        assertEquals(true, primary.path("is_primary").asBoolean(), indexes.toString());
+        assertEquals(true, primary.path("is_unique").asBoolean(), indexes.toString());
+        assertEquals(true, unique.path("is_unique").asBoolean(), indexes.toString());
+        assertEquals(false, unique.path("is_primary").asBoolean(), indexes.toString());
+    }
+
+    @Test
+    void oracleListIndexesGroupsColumnsAndMarksPrimaryKey() throws Exception {
+        ResultSet rows = rowsResultSet(
+            new String[] { "index_name", "uniqueness", "index_type", "column_name", "is_primary" },
+            new Object[][] {
+                { "CODEX_7046_CODE_IDX", "NONUNIQUE", "NORMAL", "CODE", 0 },
+                { "CODEX_7046_PK", "UNIQUE", "NORMAL", "ID", 1 },
+                { "CODEX_7046_PK", "UNIQUE", "NORMAL", "TENANT_ID", 1 }
+            }
+        );
+        Connection conn = preparedStatementConnection(rows);
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "oracleListIndexes",
+            Connection.class,
+            String.class,
+            String.class
+        );
+        method.setAccessible(true);
+
+        JsonNode indexes = (JsonNode) method.invoke(null, conn, "DBX_TEST", "CODEX_7046_META");
+
+        JsonNode primary = findByName(indexes, "CODEX_7046_PK");
+        assertEquals(true, primary.path("is_primary").asBoolean());
+        assertEquals(true, primary.path("is_unique").asBoolean());
+        assertEquals("ID", primary.path("columns").path(0).asText());
+        assertEquals("TENANT_ID", primary.path("columns").path(1).asText());
+        JsonNode secondary = findByName(indexes, "CODEX_7046_CODE_IDX");
+        assertEquals(false, secondary.path("is_primary").asBoolean());
+        assertEquals(false, secondary.path("is_unique").asBoolean());
+    }
+
+    @Test
+    void listIndexesDegradesToEmptyWhenDriverRejectsIndexMetadata() throws Exception {
+        for (Throwable failure : List.of(
+            new SQLFeatureNotSupportedException("indexes not supported"),
+            new UnsupportedOperationException("unsupported"),
+            new AbstractMethodError("unsupported")
+        )) {
+            String connection = """
+                { "connection_string": "jdbc:dbx-index-metadata:%s" }
+                """.formatted(failure.getClass().getSimpleName());
+            Driver driver = testDriver("jdbc:dbx-index-metadata:", indexMetadataConnection(failure));
+            DriverManager.registerDriver(driver);
+            try {
+                JsonNode response = request("listIndexes", """
+                    {
+                      "connection": %s,
+                      "schema": "PUBLIC",
+                      "table": "SOME_TABLE"
+                    }
+                    """.formatted(connection));
+
+                assertFalse(response.has("error"), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals(0, response.path("result").size(), failure.getClass().getSimpleName() + ": " + response);
+            } finally {
+                closeAndDeregister(connection, driver);
+            }
+        }
+    }
+
+    @Test
     void oracleEffectiveSchemaUsesExactOwnerBeforeUppercaseFallback() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleEffectiveSchema", Connection.class, String.class);
         method.setAccessible(true);
@@ -3027,6 +3126,39 @@ final class DbxJdbcPluginTest {
         );
     }
 
+    private static Connection preparedStatementConnection(ResultSet rs) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "prepareStatement" -> preparedStatement(rs);
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static JsonNode findByName(JsonNode items, String name) {
+        for (JsonNode item : items) {
+            if (name.equalsIgnoreCase(item.path("name").asText())) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    private static JsonNode findIndexByColumn(JsonNode indexes, String column) {
+        for (JsonNode index : indexes) {
+            for (JsonNode value : index.path("columns")) {
+                if (column.equalsIgnoreCase(value.asText())) {
+                    return index;
+                }
+            }
+        }
+        return null;
+    }
+
     private static ResultSet rowsResultSet(String[] columns, Object[][] rows) {
         return (ResultSet) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
@@ -3286,6 +3418,29 @@ final class DbxJdbcPluginTest {
                 case "getMinorVersion" -> 0;
                 case "jdbcCompliant" -> false;
                 case "getParentLogger" -> java.util.logging.Logger.getGlobal();
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Connection indexMetadataConnection(Throwable failure) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getPrimaryKeys".equals(method.getName()) || "getIndexInfo".equals(method.getName())) {
+                    throw failure;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "close" -> null;
                 default -> defaultValue(method.getReturnType());
             }
         );

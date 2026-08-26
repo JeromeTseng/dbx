@@ -64,7 +64,11 @@ RUN case "$TARGETARCH" in \
 
 # Copy real sources and rebuild (only application code recompiles)
 COPY crates/ crates/
+# dbx-core's build.rs embeds plugins/dialects (SQL dialects) and
+# plugins/connection-types (database manifest + DatabaseType enum);
+# either directory missing makes the build script panic.
 COPY plugins/dialects/ plugins/dialects/
+COPY plugins/connection-types/ plugins/connection-types/
 
 # Docker COPY preserves original file timestamps, which may be older than the
 # dummy-source binary compiled above. Touch all .rs files so cargo detects the

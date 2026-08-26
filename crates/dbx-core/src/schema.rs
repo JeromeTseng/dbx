@@ -1162,6 +1162,38 @@ pub async fn get_table_comment_core(
     result
 }
 
+pub async fn get_mysql_table_auto_increment_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    table: &str,
+) -> Result<Option<String>, String> {
+    let db_config = connection_config(state, connection_id).await;
+    let native_mysql = db_config.as_ref().is_some_and(|config| {
+        config.db_type == DatabaseType::Mysql
+            && config
+                .driver_profile
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(|profile| profile.is_empty() || profile.eq_ignore_ascii_case("mysql"))
+    });
+    if !native_mysql {
+        return Err("AUTO_INCREMENT metadata is supported only for native MySQL connections.".to_string());
+    }
+
+    retry_metadata_connection_for_session(state, connection_id, Some(database), None, || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+        match &pool {
+            PoolKind::Mysql(pool, mode) if *mode != MysqlMode::OceanBaseOracle => {
+                db::mysql::get_table_auto_increment(pool, database, table).await
+            }
+            _ => Err("AUTO_INCREMENT metadata is supported only for native MySQL connections.".to_string()),
+        }
+    })
+    .await
+}
+
 async fn get_table_comment_core_for_session(
     state: &AppState,
     connection_id: &str,
@@ -2186,7 +2218,8 @@ async fn list_tables_once(
 
     {
         let connections = state.connections.read().await;
-        if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
+        if let Some(PoolKind::ExternalDriver { driver_id, config, session }) = connections.get(&pool_key) {
+            let driver_id = driver_id.clone();
             let config = config.clone();
             let session = session.clone();
             drop(connections);
@@ -2212,6 +2245,12 @@ async fn list_tables_once(
             if let Some(object_types) = object_types {
                 params["object_types"] = serde_json::json!(object_types);
             }
+            if let Some(limit) = limit {
+                params["limit"] = serde_json::json!(limit);
+            }
+            if let Some(offset) = offset {
+                params["offset"] = serde_json::json!(offset);
+            }
             return session
                 .invoke_with_timeout::<Vec<db::TableInfo>>(
                     "listTables",
@@ -2219,7 +2258,14 @@ async fn list_tables_once(
                     agent_metadata_timeout(Some(config.as_ref())),
                 )
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
+                .map(|tables| {
+                    let final_offset = if external_driver_paging_likely_applied(&driver_id, limit, tables.len()) {
+                        Some(0)
+                    } else {
+                        offset
+                    };
+                    filter_table_infos(tables, filter, limit, final_offset, object_types, table_name_filter)
+                });
         }
         #[cfg(feature = "duckdb-sidecar")]
         if let Some(client) = extract_pool!(&connections, &pool_key, DuckDbWorker) {
@@ -2233,6 +2279,17 @@ async fn list_tables_once(
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, ClickHouse) {
             drop(connections);
+            if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
+                return db::clickhouse_driver::list_table_objects_filtered(
+                    &client,
+                    clickhouse_metadata_database(database, schema),
+                    filter,
+                    limit,
+                    offset,
+                )
+                .await
+                .map(|tables| filter_table_infos(tables, None, None, None, object_types, None));
+            }
             return db::clickhouse_driver::list_tables(&client, clickhouse_metadata_database(database, schema))
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
@@ -2264,6 +2321,13 @@ async fn list_tables_once(
                 )
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
+            }
+        }
+        if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
+            if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
+                drop(connections);
+                let mut client = lock_sqlserver_metadata_client(&client).await?;
+                return db::sqlserver::list_table_objects(&mut client, schema, filter, limit, offset).await;
             }
         }
         if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
@@ -2513,7 +2577,9 @@ async fn list_tables_once(
             }
         }
         PoolKind::Postgres(p) => {
-            if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
+            if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
+                db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+            } else if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
                 db::postgres::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
@@ -2692,6 +2758,10 @@ fn normalize_table_info_object_type(value: &str) -> String {
         return "INDEX".to_string();
     }
     "TABLE".to_string()
+}
+
+fn requests_table_objects_only(object_types: Option<&[String]>) -> bool {
+    object_types.is_some_and(|types| types.len() == 1 && normalize_table_info_object_type(&types[0]) == "TABLE")
 }
 
 fn uses_presto_like_information_schema_tables(db_type: &DatabaseType) -> bool {
@@ -3189,6 +3259,7 @@ mod tests {
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -3991,6 +4062,15 @@ for line in sys.stdin:
         assert!(!super::agent_paging_likely_applied(true, Some(500), 501));
         assert!(!super::agent_paging_likely_applied(false, Some(500), 120));
         assert!(!super::agent_paging_likely_applied(true, None, 120));
+    }
+
+    #[test]
+    fn external_driver_paging_detection_avoids_double_offset_for_jdbc_only() {
+        assert!(super::external_driver_paging_likely_applied("jdbc", Some(500), 500));
+        assert!(super::external_driver_paging_likely_applied("jdbc", Some(500), 120));
+        assert!(!super::external_driver_paging_likely_applied("jdbc", Some(500), 501));
+        assert!(!super::external_driver_paging_likely_applied("jdbc", None, 120));
+        assert!(!super::external_driver_paging_likely_applied("other", Some(500), 120));
     }
 
     #[test]
@@ -6753,6 +6833,21 @@ async fn list_indexes_core_for_session(
                     drop(connections);
                     return external_driver_gaussdb_m_indexes(session, config.as_ref(), database, schema, table).await;
                 }
+                let config = config.clone();
+                let session = session.clone();
+                drop(connections);
+                return session
+                    .invoke_with_timeout::<Vec<db::IndexInfo>>(
+                        "listIndexes",
+                        serde_json::json!({
+                            "connection": config.as_ref(),
+                            "database": database,
+                            "schema": schema,
+                            "table": table,
+                        }),
+                        agent_metadata_timeout(Some(config.as_ref())),
+                    )
+                    .await;
             }
             if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
                 drop(connections);
@@ -7592,6 +7687,10 @@ fn agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len
     enabled && limit.is_some_and(|limit| returned_len <= limit)
 }
 
+fn external_driver_paging_likely_applied(driver_id: &str, limit: Option<usize>, returned_len: usize) -> bool {
+    driver_id == "jdbc" && limit.is_some_and(|limit| returned_len <= limit)
+}
+
 fn mysql_show_metadata_database_for_config<'a>(config: Option<&ConnectionConfig>, database: &'a str) -> &'a str {
     if config.is_some_and(db::manticoresearch::is_config) {
         ""
@@ -7925,7 +8024,7 @@ pub fn postgres_object_source_sql(
     kind: &db::ObjectSourceKind,
     signature: Option<&str>,
 ) -> String {
-    postgres_object_source_sql_inner(schema, name, kind, signature, true, false)
+    postgres_object_source_sql_inner(schema, name, kind, signature, true, false, true)
 }
 
 fn postgres_trigger_object_source_sql(schema: &str, name: &str, relation_name: Option<&str>) -> String {
@@ -7952,7 +8051,7 @@ fn opengauss_object_source_sql(
     kind: &db::ObjectSourceKind,
     signature: Option<&str>,
 ) -> String {
-    postgres_object_source_sql_inner(schema, name, kind, signature, true, true)
+    postgres_object_source_sql_inner(schema, name, kind, signature, true, true, false)
 }
 
 fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache: bool) -> String {
@@ -7993,15 +8092,6 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache:
         schema = sql_string(schema),
         name = sql_string(name)
     )
-}
-
-fn postgres_object_source_sql_without_relispopulated(
-    schema: &str,
-    name: &str,
-    kind: &db::ObjectSourceKind,
-    signature: Option<&str>,
-) -> String {
-    postgres_object_source_sql_inner(schema, name, kind, signature, false, false)
 }
 
 fn postgres_function_object_source_sql_without_prokind(
@@ -8057,6 +8147,7 @@ fn postgres_object_source_sql_inner(
     signature: Option<&str>,
     include_relispopulated: bool,
     unwrap_opengauss_record: bool,
+    isolate_view_search_path: bool,
 ) -> String {
     match kind {
         db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => {
@@ -8065,20 +8156,35 @@ fn postgres_object_source_sql_inner(
             } else {
                 ""
             };
-            let materialized_viewdef = "regexp_replace(pg_get_viewdef(c.oid, 0), ';[[:space:]]*$', '')";
+            let viewdef = if isolate_view_search_path {
+                "pg_catalog.pg_get_viewdef(c.oid, 0)"
+            } else {
+                "pg_get_viewdef(c.oid, 0)"
+            };
+            let regexp_replace = if isolate_view_search_path { "pg_catalog.regexp_replace" } else { "regexp_replace" };
+            let format_fn = if isolate_view_search_path { "pg_catalog.format" } else { "format" };
+            let materialized_viewdef = format!("{regexp_replace}({viewdef}, ';[[:space:]]*$', '')");
             let materialized_source_expr = format!(
                 "CASE WHEN {materialized_viewdef} ~* '^[[:space:]]*CREATE[[:space:]]+(OR[[:space:]]+REPLACE[[:space:]]+)?MATERIALIZED[[:space:]]+VIEW[[:space:]]+' \
                  THEN {materialized_viewdef} \
-                 ELSE format('CREATE MATERIALIZED VIEW %I.%I AS ', n.nspname, c.relname) || {materialized_viewdef}{materialized_populated_clause} \
+                 ELSE {format_fn}('CREATE MATERIALIZED VIEW %I.%I AS ', n.nspname, c.relname) || {materialized_viewdef}{materialized_populated_clause} \
                  END"
             );
+            let search_path_cte = if isolate_view_search_path {
+                "WITH dbx_search_path AS (SELECT pg_catalog.set_config('search_path', '', true) AS applied) "
+            } else {
+                ""
+            };
+            let search_path_join = if isolate_view_search_path { " CROSS JOIN dbx_search_path path_guard" } else { "" };
+            let search_path_guard = if isolate_view_search_path { " AND path_guard.applied IS NOT NULL" } else { "" };
             format!(
-                "SELECT CASE WHEN c.relkind = 'm' THEN {} \
-                 ELSE format('CREATE OR REPLACE VIEW %I.%I AS ', n.nspname, c.relname) || pg_get_viewdef(c.oid, 0) \
+                "{search_path_cte}SELECT CASE WHEN c.relkind = 'm' THEN {} \
+                 ELSE {format_fn}('CREATE OR REPLACE VIEW %I.%I AS ', n.nspname, c.relname) || {viewdef} \
                  END \
                  FROM pg_catalog.pg_class c \
                  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE n.nspname = {} AND c.relname = {} AND c.relkind IN ('v','m') \
+                 {search_path_join} \
+                 WHERE n.nspname = {} AND c.relname = {} AND c.relkind IN ('v','m'){search_path_guard} \
                  ORDER BY c.oid LIMIT 1",
                 materialized_source_expr,
                 sql_string(schema),
@@ -8255,15 +8361,32 @@ pub(crate) fn mysql_object_source_ddl_column_index(kind: &db::ObjectSourceKind) 
     }
 }
 
+fn postgres_view_source_fallback_sql_inner(schema: &str, name: &str, isolate_search_path: bool) -> String {
+    if isolate_search_path {
+        format!(
+            "WITH dbx_search_path AS (SELECT pg_catalog.set_config('search_path', '', true) AS applied) \
+             SELECT v.definition \
+             FROM pg_catalog.pg_views v \
+             CROSS JOIN dbx_search_path path_guard \
+             WHERE v.schemaname = {} AND v.viewname = {} AND path_guard.applied IS NOT NULL \
+             LIMIT 1",
+            sql_string(schema),
+            sql_string(name)
+        )
+    } else {
+        format!(
+            "SELECT definition \
+             FROM pg_catalog.pg_views \
+             WHERE schemaname = {} AND viewname = {} \
+             LIMIT 1",
+            sql_string(schema),
+            sql_string(name)
+        )
+    }
+}
+
 pub fn postgres_view_source_fallback_sql(schema: &str, name: &str) -> String {
-    format!(
-        "SELECT definition \
-         FROM pg_catalog.pg_views \
-         WHERE schemaname = {} AND viewname = {} \
-         LIMIT 1",
-        sql_string(schema),
-        sql_string(name)
-    )
+    postgres_view_source_fallback_sql_inner(schema, name, true)
 }
 
 fn first_string_cell(result: db::QueryResult) -> Result<String, String> {
@@ -8642,6 +8765,9 @@ async fn get_object_source_once(
                 }
                 PoolKind::Postgres(pool) => {
                     let unwrap_opengauss_record = db_config.as_ref().is_some_and(is_opengauss_family_config);
+                    let isolate_view_search_path = postgres_view_source_uses_isolated_search_path(
+                        db_config.as_ref().map(|config| &config.db_type),
+                    );
                     postgres_object_source(
                         pool,
                         schema,
@@ -8650,6 +8776,7 @@ async fn get_object_source_once(
                         signature,
                         relation_name,
                         unwrap_opengauss_record,
+                        isolate_view_search_path,
                     )
                     .await?
                 }
@@ -9015,6 +9142,10 @@ async fn db2_column_comments(
     comments
 }
 
+fn postgres_view_source_uses_isolated_search_path(database_type: Option<&DatabaseType>) -> bool {
+    database_type == Some(&DatabaseType::Postgres)
+}
+
 async fn postgres_object_source(
     pool: &deadpool_postgres::Pool,
     schema: &str,
@@ -9023,13 +9154,16 @@ async fn postgres_object_source(
     signature: Option<&str>,
     relation_name: Option<&str>,
     unwrap_opengauss_record: bool,
+    isolate_view_search_path: bool,
 ) -> Result<String, String> {
     let sql = if matches!(object_type, db::ObjectSourceKind::Trigger) {
         postgres_trigger_object_source_sql(schema, name, relation_name)
     } else if unwrap_opengauss_record {
         opengauss_object_source_sql(schema, name, object_type, signature)
-    } else {
+    } else if isolate_view_search_path {
         postgres_object_source_sql(schema, name, object_type, signature)
+    } else {
+        postgres_object_source_sql_inner(schema, name, object_type, signature, true, false, false)
     };
     match db::postgres::execute_query(pool, &sql).await.and_then(first_string_cell) {
         Ok(source) => Ok(source),
@@ -9037,7 +9171,15 @@ async fn postgres_object_source(
             if postgres_missing_relispopulated_error(&primary_err)
                 && matches!(object_type, db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView) =>
         {
-            let fallback_sql = postgres_object_source_sql_without_relispopulated(schema, name, object_type, signature);
+            let fallback_sql = postgres_object_source_sql_inner(
+                schema,
+                name,
+                object_type,
+                signature,
+                false,
+                false,
+                isolate_view_search_path,
+            );
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
                 .and_then(first_string_cell)
@@ -9080,7 +9222,7 @@ async fn postgres_object_source(
                 .map_err(|fallback_err| format!("{primary_err}; prokind fallback failed: {fallback_err}"))
         }
         Err(primary_err) if matches!(object_type, db::ObjectSourceKind::View) => {
-            let fallback_sql = postgres_view_source_fallback_sql(schema, name);
+            let fallback_sql = postgres_view_source_fallback_sql_inner(schema, name, isolate_view_search_path);
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
                 .and_then(first_string_cell)
@@ -9155,6 +9297,11 @@ mod object_source_tests {
     fn builds_postgres_object_source_sql_for_views_and_functions() {
         let view_sql = postgres_object_source_sql("public", "active_users", &ObjectSourceKind::View, None);
 
+        assert!(view_sql
+            .starts_with("WITH dbx_search_path AS (SELECT pg_catalog.set_config('search_path', '', true) AS applied)"));
+        assert!(view_sql.contains("pg_catalog.pg_get_viewdef(c.oid, 0)"));
+        assert!(view_sql.contains("CROSS JOIN dbx_search_path path_guard"));
+        assert!(view_sql.contains("path_guard.applied IS NOT NULL"));
         assert!(view_sql.contains("CREATE MATERIALIZED VIEW"));
         assert!(view_sql.contains("CREATE OR REPLACE VIEW"));
         assert!(view_sql.contains("CASE WHEN c.relispopulated THEN ' WITH DATA' ELSE ' WITH NO DATA' END"));
@@ -9170,6 +9317,29 @@ mod object_source_tests {
             postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function, Some("integer, integer")),
             "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' AND pg_get_function_identity_arguments(p.oid) = 'integer, integer' ORDER BY p.oid LIMIT 1"
         );
+
+        let opengauss_view_sql = opengauss_object_source_sql("public", "active_users", &ObjectSourceKind::View, None);
+        assert!(!opengauss_view_sql.contains("set_config('search_path'"));
+
+        let compatible_view_sql = postgres_object_source_sql_inner(
+            "public",
+            "active_users",
+            &ObjectSourceKind::View,
+            None,
+            true,
+            false,
+            false,
+        );
+        assert!(!compatible_view_sql.contains("set_config('search_path'"));
+    }
+
+    #[test]
+    fn isolates_view_search_path_only_for_native_postgres() {
+        assert!(postgres_view_source_uses_isolated_search_path(Some(&DatabaseType::Postgres)));
+        assert!(!postgres_view_source_uses_isolated_search_path(Some(&DatabaseType::Redshift)));
+        assert!(!postgres_view_source_uses_isolated_search_path(Some(&DatabaseType::OpenGauss)));
+        assert!(!postgres_view_source_uses_isolated_search_path(Some(&DatabaseType::Kingbase)));
+        assert!(!postgres_view_source_uses_isolated_search_path(None));
     }
 
     #[test]
@@ -9185,15 +9355,20 @@ mod object_source_tests {
 
     #[test]
     fn builds_postgres_object_source_sql_without_relispopulated_for_legacy_catalogs() {
-        let sql = postgres_object_source_sql_without_relispopulated(
+        let sql = postgres_object_source_sql_inner(
             "public",
             "active_users",
             &ObjectSourceKind::MaterializedView,
             None,
+            false,
+            false,
+            true,
         );
 
         assert!(sql.contains("CREATE MATERIALIZED VIEW"));
-        assert!(sql.contains("pg_get_viewdef(c.oid, 0)"));
+        assert!(sql.contains("pg_catalog.pg_get_viewdef(c.oid, 0)"));
+        assert!(sql.contains("pg_catalog.set_config('search_path', '', true)"));
+        assert!(sql.contains("path_guard.applied IS NOT NULL"));
         assert!(!sql.contains("relispopulated"));
     }
 
@@ -9330,7 +9505,7 @@ mod object_source_tests {
             )
         );
         assert!(sql.contains(
-            "THEN regexp_replace(pg_get_viewdef(c.oid, 0), ';[[:space:]]*$', '') ELSE format('CREATE MATERIALIZED VIEW"
+            "THEN pg_catalog.regexp_replace(pg_catalog.pg_get_viewdef(c.oid, 0), ';[[:space:]]*$', '') ELSE pg_catalog.format('CREATE MATERIALIZED VIEW"
         ));
     }
 
@@ -9363,6 +9538,10 @@ mod object_source_tests {
     fn builds_postgres_view_source_fallback_sql_from_pg_views() {
         assert_eq!(
             postgres_view_source_fallback_sql("tenant's schema", "active users"),
+            "WITH dbx_search_path AS (SELECT pg_catalog.set_config('search_path', '', true) AS applied) SELECT v.definition FROM pg_catalog.pg_views v CROSS JOIN dbx_search_path path_guard WHERE v.schemaname = 'tenant''s schema' AND v.viewname = 'active users' AND path_guard.applied IS NOT NULL LIMIT 1"
+        );
+        assert_eq!(
+            postgres_view_source_fallback_sql_inner("tenant's schema", "active users", false),
             "SELECT definition FROM pg_catalog.pg_views WHERE schemaname = 'tenant''s schema' AND viewname = 'active users' LIMIT 1"
         );
     }

@@ -89,7 +89,7 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
   ];
 
   return (
-    <main className="min-h-screen bg-[#0b1120] text-landing-ink">
+    <main className="min-h-screen bg-[#08080a] text-landing-ink">
       <LandingNav lang={locale} active="sponsors" />
 
       <section className="max-w-[1180px] mx-auto px-6 pt-32 pb-24">

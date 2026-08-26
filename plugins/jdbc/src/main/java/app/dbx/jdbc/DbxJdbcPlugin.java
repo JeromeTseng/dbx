@@ -44,12 +44,14 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.ServiceLoader;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -405,6 +407,12 @@ public final class DbxJdbcPlugin {
                 nonNegativeInt(params, "limit", 0),
                 nonNegativeInt(params, "offset", 0),
                 optionalStringList(params, "object_types")
+            );
+            case "listIndexes", "list_indexes" -> listIndexes(
+                connection,
+                optionalText(params, "database"),
+                optionalText(params, "schema"),
+                requireText(params, "table")
             );
             case "listDataTypes", "list_data_types" -> listDataTypes(connection, optionalText(params, "database"));
             case "getObjectSource", "get_object_source" -> getObjectSource(
@@ -1935,11 +1943,11 @@ public final class DbxJdbcPlugin {
         }
         String catalog = metadataCatalog(database, quirks);
         String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
-        appendTables(result, meta, catalog, schemaPattern, types);
-        if (result.isEmpty() && catalog != null) {
-            appendTables(result, meta, null, schemaPattern, types);
+        boolean catalogHadTables = appendTables(result, meta, catalog, schemaPattern, types, filter, limit, offset);
+        if (!catalogHadTables && catalog != null) {
+            appendTables(result, meta, null, schemaPattern, types, filter, limit, offset);
         }
-        return filterMetadataNodes(result, filter, limit, offset, objectTypes, "table_type", true);
+        return result;
     }
 
     private static JsonNode listObjects(
@@ -2086,6 +2094,131 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
+    private static JsonNode listIndexes(JsonNode connection, String database, String schema, String table)
+        throws SQLException {
+        Connection conn = openConnection(connection);
+        JdbcDriverQuirks quirks = driverQuirks(connection);
+        if (quirks.useOracleMetadata()) {
+            String owner = oracleEffectiveSchema(conn, schema);
+            String resolvedTable = oracleResolveTable(conn, owner, table);
+            return oracleListIndexes(conn, owner, resolvedTable == null ? table : resolvedTable);
+        }
+
+        DatabaseMetaData meta = conn.getMetaData();
+        String catalog = metadataCatalog(database, quirks);
+        String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
+        Set<String> primaryIndexNames = new HashSet<>();
+        Map<Integer, String> primaryColumnsBySequence = new TreeMap<>();
+        try (ResultSet rs = meta.getPrimaryKeys(catalog, schemaPattern, table)) {
+            while (rs != null && rs.next()) {
+                String name = rs.getString("PK_NAME");
+                if (name != null && !name.isBlank()) {
+                    primaryIndexNames.add(name);
+                }
+                String column = rs.getString("COLUMN_NAME");
+                if (column != null && !column.isBlank()) {
+                    primaryColumnsBySequence.put((int) rs.getShort("KEY_SEQ"), column);
+                }
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+
+        // Presto/Trino JDBC throws SQLFeatureNotSupportedException from getIndexInfo, and
+        // drivers compiled before JDBC 4 surface unimplemented DatabaseMetaData methods as
+        // AbstractMethodError. Both must degrade to an empty list, matching the metadata
+        // error tolerance used by the other DatabaseMetaData readers in this plugin.
+        LinkedHashMap<String, ObjectNode> indexes = new LinkedHashMap<>();
+        try (ResultSet rs = meta.getIndexInfo(catalog, schemaPattern, table, false, false)) {
+            appendJdbcIndexes(indexes, primaryIndexNames, rs);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+        if (indexes.isEmpty() && catalog != null) {
+            try (ResultSet rs = meta.getIndexInfo(null, schemaPattern, table, false, false)) {
+                appendJdbcIndexes(indexes, primaryIndexNames, rs);
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+        }
+        markPrimaryIndexByColumns(indexes.values(), new ArrayList<>(primaryColumnsBySequence.values()));
+        ArrayNode result = MAPPER.createArrayNode();
+        indexes.values().forEach(result::add);
+        return result;
+    }
+
+    private static void markPrimaryIndexByColumns(Iterable<ObjectNode> indexes, List<String> primaryColumns) {
+        if (primaryColumns.isEmpty()) {
+            return;
+        }
+        for (ObjectNode index : indexes) {
+            if (index.path("is_primary").asBoolean()) {
+                return;
+            }
+        }
+        for (ObjectNode index : indexes) {
+            JsonNode columns = index.path("columns");
+            if (columns.size() != primaryColumns.size()) {
+                continue;
+            }
+            boolean matches = true;
+            for (int i = 0; i < primaryColumns.size(); i++) {
+                if (!primaryColumns.get(i).equalsIgnoreCase(columns.path(i).asText())) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                index.put("is_primary", true);
+                return;
+            }
+        }
+    }
+
+    private static void appendJdbcIndexes(
+        Map<String, ObjectNode> indexes,
+        Set<String> primaryIndexNames,
+        ResultSet rs
+    ) throws SQLException {
+        while (rs != null && rs.next()) {
+            String name = rs.getString("INDEX_NAME");
+            String column = rs.getString("COLUMN_NAME");
+            if (name == null || name.isBlank() || column == null || column.isBlank()) {
+                continue;
+            }
+            ObjectNode item = indexes.get(name);
+            if (item == null) {
+                item = indexNode(
+                    name,
+                    !rs.getBoolean("NON_UNIQUE"),
+                    primaryIndexNames.contains(name),
+                    jdbcIndexType(rs.getShort("TYPE"))
+                );
+                indexes.put(name, item);
+            }
+            ((ArrayNode) item.path("columns")).add(column);
+        }
+    }
+
+    private static String jdbcIndexType(short type) {
+        return switch (type) {
+            case DatabaseMetaData.tableIndexClustered -> "CLUSTERED";
+            case DatabaseMetaData.tableIndexHashed -> "HASHED";
+            case DatabaseMetaData.tableIndexOther -> "OTHER";
+            default -> null;
+        };
+    }
+
+    private static ObjectNode indexNode(String name, boolean unique, boolean primary, String indexType) {
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        item.set("columns", MAPPER.createArrayNode());
+        item.put("is_unique", unique);
+        item.put("is_primary", primary);
+        item.putNull("filter");
+        putNullable(item, "index_type", indexType);
+        item.putNull("included_columns");
+        item.putNull("comment");
+        return item;
+    }
+
     private static JsonNode getColumns(JsonNode connection, String database, String schema, String table) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
         Connection conn = openConnection(connection);
@@ -2200,22 +2333,41 @@ public final class DbxJdbcPlugin {
         }
     }
 
-    private static void appendTables(
+    private static boolean appendTables(
         ArrayNode result,
         DatabaseMetaData meta,
         String catalog,
         String schema,
-        String[] types
+        String[] types,
+        String filter,
+        int limit,
+        int offset
     ) throws SQLException {
+        String normalizedFilter = filter == null ? "" : filter.trim().toLowerCase(Locale.ROOT);
+        int skipped = 0;
+        int max = limit <= 0 ? Integer.MAX_VALUE : limit;
+        boolean found = false;
         try (ResultSet rs = meta.getTables(catalog, schema, "%", types)) {
             while (rs.next()) {
+                found = true;
+                String name = rs.getString("TABLE_NAME");
+                if (!metadataNameMatches(name, normalizedFilter)) {
+                    continue;
+                }
+                if (skipped++ < Math.max(0, offset)) {
+                    continue;
+                }
                 ObjectNode item = MAPPER.createObjectNode();
-                item.put("name", rs.getString("TABLE_NAME"));
+                item.put("name", name);
                 item.put("table_type", rs.getString("TABLE_TYPE"));
                 putNullable(item, "comment", rs.getString("REMARKS"));
                 result.add(item);
+                if (result.size() >= max) {
+                    break;
+                }
             }
         }
+        return found;
     }
 
     static String[] jdbcTableTypes(DatabaseMetaData meta) throws SQLException {
@@ -3342,6 +3494,74 @@ public final class DbxJdbcPlugin {
                 }
             }
         }
+        String sequenceSql = "SELECT sequence_name AS name FROM all_sequences WHERE sequence_owner = ? ORDER BY sequence_name";
+        try (PreparedStatement ps = conn.prepareStatement(sequenceSql)) {
+            ps.setString(1, owner);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", rs.getString("name"));
+                    item.put("object_type", "SEQUENCE");
+                    putNullable(item, "schema", schemaLabel);
+                    item.putNull("comment");
+                    result.add(item);
+                }
+            }
+        }
+        String synonymSql = "SELECT synonym_name AS name FROM all_synonyms WHERE owner = ? ORDER BY synonym_name";
+        try (PreparedStatement ps = conn.prepareStatement(synonymSql)) {
+            ps.setString(1, owner);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", rs.getString("name"));
+                    item.put("object_type", "SYNONYM");
+                    putNullable(item, "schema", schemaLabel);
+                    item.putNull("comment");
+                    result.add(item);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static JsonNode oracleListIndexes(Connection conn, String owner, String table) throws SQLException {
+        String sql =
+            "SELECT i.index_name, i.uniqueness, i.index_type, ic.column_name, " +
+            "CASE WHEN pk.index_name IS NULL THEN 0 ELSE 1 END AS is_primary " +
+            "FROM all_indexes i " +
+            "JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name " +
+            "AND ic.table_owner = i.table_owner AND ic.table_name = i.table_name " +
+            "LEFT JOIN (SELECT owner, index_name, table_name FROM all_constraints WHERE constraint_type = 'P') pk " +
+            "ON pk.owner = i.owner AND pk.index_name = i.index_name AND pk.table_name = i.table_name " +
+            "WHERE i.table_owner = ? AND i.table_name = ? " +
+            "ORDER BY i.index_name, ic.column_position";
+        LinkedHashMap<String, ObjectNode> indexes = new LinkedHashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, owner);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString("index_name");
+                    ObjectNode item = indexes.get(name);
+                    if (item == null) {
+                        item = indexNode(
+                            name,
+                            "UNIQUE".equalsIgnoreCase(rs.getString("uniqueness")),
+                            rs.getInt("is_primary") != 0,
+                            rs.getString("index_type")
+                        );
+                        indexes.put(name, item);
+                    }
+                    String column = rs.getString("column_name");
+                    if (column != null && !column.isBlank()) {
+                        ((ArrayNode) item.path("columns")).add(column);
+                    }
+                }
+            }
+        }
+        ArrayNode result = MAPPER.createArrayNode();
+        indexes.values().forEach(result::add);
         return result;
     }
 

@@ -801,6 +801,52 @@ describe("sqlCompletion scoped context classification", () => {
 });
 
 describe("sqlCompletion scoped metadata ranking", () => {
+  it("shows a table metadata detail in the completion item", () => {
+    const sql = "SELECT * FROM orders";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "orders", type: "table", detail: "→ Customer orders" }],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(items).toEqual([expect.objectContaining({ label: "orders", detail: "→ Customer orders" })]);
+  });
+
+  it("hides the redundant table type while preserving view and schema details", () => {
+    const simpleItems = buildSqlCompletionItems("SELECT * FROM orders", "SELECT * FROM orders".length, {
+      tables: [{ name: "orders", schema: "public", type: "table" }],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(simpleItems.find((item) => item.label === "orders")?.detail).toBeUndefined();
+
+    const viewItems = buildSqlCompletionItems("SELECT * FROM order_view", "SELECT * FROM order_view".length, {
+      tables: [{ name: "order_view", schema: "public", type: "view" }],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(viewItems.find((item) => item.label === "order_view")?.detail).toBe("view");
+
+    const duplicateItems = buildSqlCompletionItems("SELECT * FROM orders", "SELECT * FROM orders".length, {
+      tables: [
+        { name: "orders", schema: "archive", type: "table" },
+        { name: "orders", schema: "sales", type: "table" },
+      ],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(duplicateItems.map((item) => item.detail).sort()).toEqual(["archive.orders", "sales.orders"]);
+
+    const annotatedDuplicateItems = buildSqlCompletionItems("SELECT * FROM orders", "SELECT * FROM orders".length, {
+      tables: [
+        { name: "orders", schema: "archive", type: "table", detail: "→ Archived orders" },
+        { name: "orders", schema: "sales", type: "table", detail: "→ Current orders" },
+      ],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(annotatedDuplicateItems.map((item) => item.detail).sort()).toEqual(["archive.orders  → Archived orders", "sales.orders  → Current orders"]);
+  });
+
   it("ranks exact and prefix table matches ahead of contains/fuzzy matches", () => {
     const sql = "SELECT * FROM Temp";
     const items = buildSqlCompletionItems(sql, sql.length, {

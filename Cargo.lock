@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.92"
+version = "0.5.96"
 dependencies = [
  "anyhow",
  "axum",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.70"
+version = "0.4.73"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2102,6 +2102,7 @@ dependencies = [
  "mongodb",
  "mysql_async",
  "mysql_common",
+ "nix",
  "notify",
  "openssl",
  "pageant",
@@ -2151,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.70"
+version = "0.4.73"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2181,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.92"
+version = "0.5.96"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   closeClientConnectionSession: vi.fn(),
   closeQuerySession: vi.fn(),
   executeInManualTransaction: vi.fn(),
+  executeMulti: vi.fn(),
   getConnectionConfig: vi.fn(),
   prepareQueryPaginationExecutionPlan: vi.fn(),
   saveOpenTabsState: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("@/lib/backend/api", () => ({
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
   executeInManualTransaction: mocks.executeInManualTransaction,
+  executeMulti: mocks.executeMulti,
   prepareQueryPaginationExecutionPlan: mocks.prepareQueryPaginationExecutionPlan,
   saveOpenTabsState: mocks.saveOpenTabsState,
 }));
@@ -70,6 +72,10 @@ function successfulUpdate() {
   return [{ columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 }];
 }
 
+function successfulSelect() {
+  return [{ columns: ["VALUE"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }];
+}
+
 describe("queryStore manual transaction expiry recovery", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -102,6 +108,8 @@ describe("queryStore manual transaction expiry recovery", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    // Tabs default to auto-commit; the expiry recovery path only applies to manual transactions.
+    store.setAutoCommit(tabId, false);
 
     await store.executeTabSql(tabId, "UPDATE USERS SET ACTIVE = 1");
     await store.executeTabSql(tabId, "UPDATE USERS SET ACTIVE = 1");
@@ -115,5 +123,105 @@ describe("queryStore manual transaction expiry recovery", () => {
     expect(tab.txnAutoRolledBack).toBe(true);
     expect(tab.result?.execution_error).not.toBe(true);
     expect(tab.result?.affected_rows).toBe(1);
+  });
+
+  it("normalizes a stale manual OceanBase tab before query dispatch", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "oceanbase-1",
+      name: "OceanBase Oracle",
+      db_type: "oceanbase-oracle",
+      database: "SYS",
+      query_timeout_secs: 30,
+    });
+    mocks.beginManualTransaction.mockRejectedValue(new Error("BEGIN manual transaction failed: Agent RPC error (-1): Unknown method: begin_manual_transaction"));
+    mocks.executeMulti.mockResolvedValue(successfulSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oceanbase-1", "SYS", "Query", "query", "SYS");
+    // Simulate a manual-mode value restored from an older saved query tab.
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "SELECT 1 FROM DUAL");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.autoCommit).toBe(true);
+    expect(mocks.beginManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeMulti).toHaveBeenCalledOnce();
+    expect(tab.result?.rows).toEqual([[1]]);
+    expect(tab.result?.execution_error).not.toBe(true);
+  });
+
+  it("does not fall back to auto-commit when a supported manual transaction fails to begin", async () => {
+    mocks.beginManualTransaction.mockRejectedValue(new Error("manual transaction begin failed"));
+    mocks.executeMulti.mockResolvedValue(successfulSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "SELECT 1 FROM DUAL");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.autoCommit).toBe(false);
+    expect(mocks.beginManualTransaction).toHaveBeenCalledOnce();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+    expect(tab.result?.execution_error).toBe(true);
+  });
+
+  it("keeps raw JDBC connections in manual mode when their effective dialect is unsupported", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "jdbc-1",
+      name: "Databend JDBC",
+      db_type: "jdbc",
+      database: "default",
+      connection_string: "jdbc:databend://localhost:8000/default",
+      query_timeout_secs: 30,
+    });
+    mocks.beginManualTransaction.mockResolvedValue("txn-jdbc");
+    mocks.executeInManualTransaction.mockResolvedValue(successfulSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("jdbc-1", "default", "Query", "query", "analytics");
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "SELECT 1");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.autoCommit).toBe(false);
+    expect(mocks.beginManualTransaction).toHaveBeenCalledOnce();
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledOnce();
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("surfaces ordinary query failures after normalizing a stale OceanBase tab", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "oceanbase-1",
+      name: "OceanBase Oracle",
+      db_type: "oceanbase-oracle",
+      database: "SYS",
+      query_timeout_secs: 30,
+    });
+    mocks.beginManualTransaction.mockRejectedValue(new Error("BEGIN manual transaction failed: Agent RPC error (-1): Unknown method: begin_manual_transaction"));
+    mocks.executeMulti.mockRejectedValue(new Error("OceanBase query failed"));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oceanbase-1", "SYS", "Query", "query", "SYS");
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "SELECT missing_column FROM DUAL");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.autoCommit).toBe(true);
+    expect(mocks.beginManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeMulti).toHaveBeenCalledOnce();
+    expect(tab.result?.execution_error).toBe(true);
   });
 });

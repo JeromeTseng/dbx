@@ -1,22 +1,19 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import type { CSSProperties } from "react";
 import { HeroProductStage } from "@/components/aceternity/HeroProductStage";
 import { InfiniteMovingCards } from "@/components/aceternity/InfiniteMovingCards";
 import { Spotlight } from "@/components/aceternity/Spotlight";
 import { LandingNav } from "@/components/landing/LandingNav";
 import { LandingFooter } from "@/components/landing/LandingFooter";
 import { InstallTabs } from "@/components/landing/InstallTabs";
-import { LandingLatestUpdates } from "@/components/landing/LandingLatestUpdates";
 import { RevealSection } from "@/components/landing/RevealSection";
 import { ContributorsWallContent } from "@/components/landing/ContributorsWall";
-import { ExpandableDatabaseGrid } from "@/components/landing/ExpandableDatabaseGrid";
+import { DatabasePillMarquee } from "@/components/landing/DatabasePillMarquee";
 import contributorSnapshot from "@/data/contributors.json";
 import { databaseSupport } from "@/data/databaseSupport";
 import type { ContributorActivityData } from "@/lib/contributorActivity";
 import { contributorsFromActivity } from "@/lib/contributors";
 import { getAppVersion } from "@/lib/appVersion";
-import { fetchChangelog } from "@/lib/changelog";
 import { fetchLatestReleaseInfo } from "@/lib/latestRelease";
 import { buildMetadata, getHtmlLang } from "@/lib/metadata";
 import { buildSoftwareApplicationStructuredData } from "@/lib/structuredData";
@@ -386,7 +383,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
   const starLabel = formatStars(contributorData.stars);
   const metricItems = metrics(starLabel)[l];
   const appVersion = getAppVersion();
-  const [initialChangelog, initialLatestRelease] = await Promise.all([fetchChangelog(l), fetchLatestReleaseInfo()]);
+  const initialLatestRelease = await fetchLatestReleaseInfo();
   const contributors = contributorsFromActivity(contributorData.contributors);
   const initialDownloadVersion = initialLatestRelease?.version ?? appVersion;
   const testimonialItems = testimonials[l];
@@ -504,35 +501,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
             </Link>
           </div>
         </div>
-        <ExpandableDatabaseGrid lang={l}>
-          {databaseSupport.map((db) => {
-            const isCta = "href" in db && db.href;
-            const nameSizeClass = db.name.length >= 14
-              ? "text-[11px] tracking-[-0.035em] max-[760px]:text-[9px]"
-              : db.name.length >= 11
-                ? "text-xs tracking-[-0.015em] max-[760px]:text-[10px]"
-                : "text-sm max-[760px]:text-[11px]";
-            const CardTag = isCta ? "a" : "div";
-            return (
-              <CardTag
-                className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:px-1.5 max-[760px]:py-2.5 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
-                key={db.name}
-                {...(isCta ? { href: db.href, target: "_blank", rel: "noopener noreferrer" } : {})}
-                style={{ "--db-tone": db.tone } as CSSProperties}
-                data-stagger
-              >
-                <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px] max-[760px]:size-8 max-[760px]:mb-2">
-                  {isCta ? (
-                    <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
-                  ) : (
-                    <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
-                  )}
-                </div>
-                <strong className={`block w-full min-w-0 px-1 font-[650] leading-[1.2] text-center [overflow-wrap:anywhere] min-[761px]:whitespace-nowrap ${nameSizeClass} ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
-              </CardTag>
-            );
-          })}
-        </ExpandableDatabaseGrid>
+        <DatabasePillMarquee items={databaseSupport.filter((db) => !db.href)} />
       </RevealSection>
 
       {/* Testimonials */}
@@ -588,9 +557,6 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           ))}
         </div>
       </RevealSection>
-
-      {/* Updates */}
-      <LandingLatestUpdates lang={l} fallbackVersion={appVersion} initialRelease={initialChangelog.releases[0]} initialLatestRelease={initialLatestRelease} />
 
       {/* Final CTA */}
       <RevealSection className="flex items-center justify-between gap-6 max-w-[1180px] mx-auto px-7 border border-landing-line rounded-[10px] bg-landing-panel mt-[72px] mb-14 py-[30px] max-[760px]:block max-[760px]:px-[18px]">

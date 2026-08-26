@@ -115,6 +115,8 @@ export interface ConnectionConfig {
   redis_key_separator?: string;
   redis_scan_page_size?: number;
   redis_database_aliases?: Record<string, string>;
+  /** Key-search templates for the Redis browser. Non-empty overrides global settings. */
+  redis_key_templates?: string[];
   etcd_endpoints?: string;
   gbase_server?: string;
   informix_server?: string;
@@ -1018,6 +1020,10 @@ export interface TableStructureEditorDraft {
   newTableName: string;
   tableComment: string;
   originalTableComment: string;
+  mysqlAutoIncrementValue?: string;
+  originalMysqlAutoIncrementValue?: string;
+  mysqlTableEngine?: string;
+  originalMysqlTableEngine?: string;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];

@@ -1275,6 +1275,8 @@ export interface SqlCompletionForeignKey {
   ref_column: string;
 }
 
+export type SqlCompletionClosingQuote = '"' | "'" | "`" | "]";
+
 export interface SqlCompletionItem {
   label: string;
   filterText?: string;
@@ -1282,7 +1284,7 @@ export interface SqlCompletionItem {
   detail?: string;
   info?: string | ((completion: Completion) => CompletionInfo | Promise<CompletionInfo>);
   apply?: string;
-  replaceClosingQuote?: '"' | "'";
+  replaceClosingQuote?: SqlCompletionClosingQuote;
   boost: number;
   exactMatch?: boolean;
   dedupeKey?: string;
@@ -1332,6 +1334,7 @@ export type SqlCompletionContextKind = "table" | "schema" | "catalog" | "routine
 
 export interface SqlCompletionContext {
   prefix: string;
+  replacementRange?: { start: number; end: number };
   qualifier?: string;
   qualifierParts?: string[];
   suggestTables: boolean;
@@ -1365,6 +1368,33 @@ export interface SqlCompletionContext {
   openingParenAfterCursor: boolean;
   contextKind: SqlCompletionContextKind;
   dataTypeContext: boolean;
+}
+
+const SQL_COMPLETION_CLOSING_QUOTES: Readonly<Record<string, SqlCompletionClosingQuote>> = {
+  '"': '"',
+  "'": "'",
+  "`": "`",
+  "[": "]",
+};
+
+export function prepareSqlCompletionReplacement(sql: string, cursor: number, context: Pick<SqlCompletionContext, "prefix" | "qualifier" | "replacementRange">, items: SqlCompletionItem[]): { from: number; items: SqlCompletionItem[] } {
+  const range = context.replacementRange;
+  const from = range && range.start >= 0 && range.start <= cursor && range.end === cursor ? range.start : cursor - context.prefix.length;
+  const closingQuote = from < cursor ? SQL_COMPLETION_CLOSING_QUOTES[sql[from] ?? ""] : undefined;
+  if (!closingQuote) return { from, items };
+  const replaceClosingQuote = sql[cursor] === closingQuote ? closingQuote : undefined;
+  return {
+    from,
+    items: items.map((item) => {
+      let prepared = item;
+      const apply = item.apply ?? item.label;
+      if (item.type === "column" && !(apply.startsWith(sql[from] ?? "") && apply.endsWith(closingQuote)) && (context.qualifier || !apply.includes("."))) {
+        const escaped = apply.replaceAll(closingQuote, closingQuote + closingQuote);
+        prepared = { ...prepared, apply: `${sql[from]}${escaped}${closingQuote}` };
+      }
+      return replaceClosingQuote && !prepared.replaceClosingQuote ? { ...prepared, replaceClosingQuote } : prepared;
+    }),
+  };
 }
 
 export interface PostgresSequenceLiteralCompletionContext {
@@ -3372,10 +3402,12 @@ function buildTableItems(
       const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
       const applyName = qualifiedByContext ? quoteCompletionApplyIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
+      const schemaDetail = ambiguousTableName && table.schema ? `${table.schema}.${table.name}` : undefined;
+      const detail = table.detail && schemaDetail ? `${schemaDetail}  ${table.detail}` : (table.detail ?? schemaDetail ?? (table.type === "table" ? undefined : table.type));
       return {
         label: table.name,
         type: "table" as const,
-        detail: table.detail ?? (table.schema ? `${table.schema}.${table.name}` : table.type),
+        detail,
         apply: formatTableAliasApply(applyName, alias, databaseType, keywordCase),
         boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
         dedupeKey: table.applyName || ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
@@ -5038,12 +5070,20 @@ function computeBoost(candidate: string, prefix: string): number {
 }
 
 // --- History-based ranking ---
+const COMPLETION_STATS_MAX_ENTRIES = 512;
 const completionStats = new Map<string, number>();
 
 /** Record a user selection to boost future rankings. */
 export function recordCompletionSelection(label: string, type: string): void {
   const key = `${type}:${label}`;
-  completionStats.set(key, (completionStats.get(key) || 0) + 1);
+  const count = completionStats.get(key) || 0;
+  completionStats.delete(key);
+  completionStats.set(key, count + 1);
+  while (completionStats.size > COMPLETION_STATS_MAX_ENTRIES) {
+    const oldest = completionStats.keys().next().value;
+    if (oldest === undefined) break;
+    completionStats.delete(oldest);
+  }
 }
 
 function getHistoryBoost(label: string, type: string): number {

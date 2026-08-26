@@ -170,7 +170,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="dolt-scroll-area">
+  <div class="virtual-scroll-area">
     <div ref="scroller" class="dolt-scroll-area-scroller" :class="props.scrollerClass" @scroll.passive="onScroll">
       <slot />
     </div>
@@ -184,7 +184,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.dolt-scroll-area {
+.virtual-scroll-area {
   position: relative;
   display: flex;
   min-width: 0;

@@ -174,6 +174,7 @@ import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { buildSidebarDdlTemplateSql, sidebarDdlTargetsForExecutionContext } from "@/lib/sidebar/sidebarDdlTemplate";
 import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
+import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
@@ -983,6 +984,10 @@ function runRowClickAction(clickDetail: number, requestId: number) {
     return;
   }
   if (node.type === "event") {
+    void openObjectBrowser(false, true);
+    return;
+  }
+  if (node.type === "group-events") {
     void openObjectBrowser();
     return;
   }
@@ -1344,7 +1349,7 @@ function requestDeleteSelectedNode(): boolean {
 function onDoubleClick(event: MouseEvent) {
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   if (activeNode.value.type === "event") {
-    void openObjectBrowser();
+    void openObjectBrowser(false, true);
     return;
   }
   if (activeNode.value.type === "group-events") {
@@ -3710,7 +3715,14 @@ async function confirmDropDatabase() {
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
     if (!executed) return;
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
-    await connectionStore.loadDatabases(connectionId, { force: true });
+    try {
+      await connectionStore.loadDatabases(connectionId, { force: true });
+    } catch {
+      // The database was already dropped successfully above; if this refresh
+      // itself fails (e.g. a network blip), evict the node directly instead
+      // of leaving the deleted database showing in the tree.
+      connectionStore.removeTreeNode(node.id);
+    }
     showDropDatabaseConfirm.value = false;
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -4071,6 +4083,13 @@ const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
   return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(dbType || "");
+});
+
+const canOpenScheduledBackups = computed(() => {
+  // Match the backup page/engine, which filter and key off the raw db_type
+  // (effectiveDatabaseTypeForConnection maps gbase/mysql-dialect jdbc to "mysql",
+  // which would show an entry the backup dialog then can't list).
+  return isTauriRuntime() && supportsScheduledDatabaseBackup(rawDatabaseType());
 });
 
 const canOpenDiagram = computed(() => {
@@ -4869,9 +4888,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     if (canExportAllDatabases.value) {
       items.push({ label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
-      if (isTauriRuntime()) {
-        items.push({ label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
-      }
+    }
+    if (canOpenScheduledBackups.value) {
+      items.push({ label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
     }
     if (canCreateDatabase.value) {
       items.push({
@@ -5242,6 +5261,9 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "redis-db" || node.type === "mongo-db" || node.type === "vector-database") {
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    if (node.type === "mongo-db" && canOpenObjectBrowser.value) {
+      items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
+    }
     if (!isNodeDefaultDatabase.value) {
       items.push({ label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
     } else {
