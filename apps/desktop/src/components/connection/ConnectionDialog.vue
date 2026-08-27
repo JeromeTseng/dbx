@@ -6188,12 +6188,7 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div v-if="form.db_type === 'sqlite' && sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="[connectionLabelTopClass, 'gap-1']">
-                      {{ t("connection.sqliteWorkerPlacement") }}
-                      <HelpTooltip :label="t('connection.sqliteWorkerPlacementHint')">
-                        {{ t("connection.sqliteWorkerPlacementHint") }}
-                      </HelpTooltip>
-                    </Label>
+                    <Label :class="connectionLabelTopClass">{{ t("connection.sqliteWorkerPlacement") }}</Label>
                     <div class="col-span-3 space-y-2">
                       <div class="flex min-h-9 flex-wrap items-center gap-x-5 gap-y-2">
                         <Tooltip v-for="option in sqliteWorkerPlacementOptions" :key="option.value" :delay-duration="0">

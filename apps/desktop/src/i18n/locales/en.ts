@@ -1097,7 +1097,6 @@ export default {
     sqliteWorkerPlacementDefault: "Default",
     sqliteWorkerPersistPathPlaceholder: "~/.cache/dbx/sqlite-worker/<digest>",
     sqliteWorkerPreplacedPathPlaceholder: "/opt/dbx/dbx-sqlite-worker",
-    sqliteWorkerPlacementHint: "Session and Persist ask for consent the first time they would actually upload, and show the destination path and digest. Pre-placed requires you to put the worker on the file host yourself first.",
     sshWorkerUploadConsentTitle: "Upload SQLite Worker",
     sshWorkerUploadConsentMessage: "DBX needs to copy a short-lived SQLite worker onto {host}:{port}. This is a privileged action. Review the destination path and digest before allowing the upload.",
     sshWorkerUploadConsentPath: "Destination path",

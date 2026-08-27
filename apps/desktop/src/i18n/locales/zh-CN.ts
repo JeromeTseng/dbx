@@ -1024,7 +1024,6 @@ export default withEnglishFallback({
     sqliteWorkerPlacementDefault: "默认",
     sqliteWorkerPersistPathPlaceholder: "~/.cache/dbx/sqlite-worker/<digest>",
     sqliteWorkerPreplacedPathPlaceholder: "/opt/dbx/dbx-sqlite-worker",
-    sqliteWorkerPlacementHint: "会话和持久模式会在首次实际上传时征求同意，并显示目标路径和摘要。预放置需要你先手动把 Worker 放到文件主机。",
     sshWorkerUploadConsentTitle: "上传 SQLite worker",
     sshWorkerUploadConsentMessage: "DBX 需要把短生命周期的 SQLite worker 复制到 {host}:{port}。这是特权操作。请先核对目标路径和摘要。",
     sshWorkerUploadConsentPath: "目标路径",
