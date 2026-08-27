@@ -1086,7 +1086,7 @@ export default {
     sshHostKeyNoticeGeneric: "SSH host key verification failed for {host}:{port}.",
     sqliteTransportSshOnly: "Remote SQLite only supports SSH hops. Proxy and HTTP tunnel layers cannot be used.",
     sqliteRemotePathPlaceholder: "/var/lib/app/data.db",
-    sqliteRemotePathHint: "Enter an absolute path on the final SSH hop. Local file pickers are disabled because the SQLite file is not on this computer.",
+    sqliteRemotePathHint: "Enter an absolute path on the final SSH hop.",
     sqliteWorkerPlacement: "SQLite worker",
     sqliteWorkerPlacementSession: "Session",
     sqliteWorkerPlacementPersist: "Persist",
