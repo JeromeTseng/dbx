@@ -23,7 +23,7 @@ use crate::database_capabilities;
 use crate::db;
 use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::query_execution_sql::{is_write_sql, strip_sql_comments_and_literals};
+use crate::query_execution_sql::{is_oracle_proven_read_only_statement, is_write_sql, strip_sql_comments_and_literals};
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
 use crate::sql_dialect::{resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
@@ -197,6 +197,18 @@ pub struct ExecuteMultiResult {
     pub error: Option<crate::backend_error::BackendError>,
     #[serde(skip_serializing_if = "is_false")]
     pub server_message: bool,
+    /// Oracle-only manual-transaction UX metadata: true only for a statement
+    /// proven to be an ordinary top-level read. Absent/false for every other
+    /// Oracle statement and every non-Oracle execution. Not part of the
+    /// reusable database-result model (`db::QueryResult`).
+    #[serde(skip_serializing_if = "is_false")]
+    pub manual_transaction_proven_read_only: bool,
+    /// Oracle-only manual-transaction UX metadata: true on the synthetic
+    /// successful result when the manual-execution splitter found zero
+    /// statements (empty/whitespace/comments-only script). Lets the frontend
+    /// treat it as a no-op rather than an unproven statement.
+    #[serde(skip_serializing_if = "is_false")]
+    pub manual_transaction_no_statement: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -243,6 +255,8 @@ impl ExecuteMultiResult {
             statement_index: None,
             error,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -256,6 +270,8 @@ impl ExecuteMultiResult {
             statement_index: Some(statement_index),
             error,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -271,6 +287,8 @@ impl ExecuteMultiResult {
             statement_index,
             error: Some(error),
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -282,6 +300,8 @@ impl ExecuteMultiResult {
             statement_index: Some(statement_index),
             error: None,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -304,6 +324,8 @@ impl ExecuteMultiResult {
             statement_index: Some(statement_index),
             error: None,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -325,7 +347,19 @@ impl ExecuteMultiResult {
             statement_index: None,
             error: None,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
+    }
+
+    fn with_manual_transaction_proven_read_only(mut self) -> Self {
+        self.manual_transaction_proven_read_only = true;
+        self
+    }
+
+    fn with_manual_transaction_no_statement(mut self) -> Self {
+        self.manual_transaction_no_statement = true;
+        self
     }
 
     pub fn without_error_detail(mut self) -> Self {
@@ -600,6 +634,8 @@ impl From<db::QueryResult> for ExecuteMultiResult {
             statement_index: None,
             error: None,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 }
@@ -613,6 +649,8 @@ impl From<db::sqlserver::SqlServerBatchResult> for ExecuteMultiResult {
             statement_index: None,
             error: None,
             server_message: result.server_message,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 }
@@ -685,10 +723,12 @@ pub async fn check_read_only_for_connection(state: &AppState, pool_key: &str, sq
         let configs = state.configs.read().await;
         crate::connection::config_for_pool_key(pool_key, &configs)
             .filter(|config| config.read_only)
-            .map(|config| (config.name.clone(), config.db_type))
+            .map(|config| (config.id.clone(), config.name.clone(), config.db_type))
     };
-    if let Some((name, database_type)) = connection {
-        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
+    if let Some((connection_id, name, database_type)) = connection {
+        if !state.write_unlock_windows.is_active(&connection_id).await {
+            crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
+        }
     }
     Ok(())
 }
@@ -703,11 +743,13 @@ pub async fn check_read_only_for_connection_multi(
         let configs = state.configs.read().await;
         crate::connection::config_for_pool_key(pool_key, &configs)
             .filter(|config| config.read_only)
-            .map(|config| (config.name.clone(), config.db_type))
+            .map(|config| (config.id.clone(), config.name.clone(), config.db_type))
     };
-    if let Some((name, database_type)) = connection {
-        for sql in statements {
-            crate::query_execution_sql::check_read_only(sql.as_ref(), &name, database_type)?;
+    if let Some((connection_id, name, database_type)) = connection {
+        if !state.write_unlock_windows.is_active(&connection_id).await {
+            for sql in statements {
+                crate::query_execution_sql::check_read_only(sql.as_ref(), &name, database_type)?;
+            }
         }
     }
     Ok(())
@@ -717,7 +759,14 @@ pub async fn check_read_only_for_connection_multi(
 /// This uses connection_id directly (not pool_key), so it is safe to call at command entry points
 /// before any pool key is constructed.
 pub async fn connection_readonly_name(state: &AppState, connection_id: &str) -> Option<String> {
-    state.configs.read().await.get(connection_id).filter(|c| c.read_only).map(|c| c.name.clone())
+    let name = {
+        let configs = state.configs.read().await;
+        configs.get(connection_id).filter(|c| c.read_only).map(|c| c.name.clone())?
+    };
+    if state.write_unlock_windows.is_active(connection_id).await {
+        return None;
+    }
+    Some(name)
 }
 
 async fn connection_is_mongodb(state: &AppState, connection_id: &str) -> bool {
@@ -1655,15 +1704,11 @@ async fn do_execute_typed(
     let _activity_touch = state.pool_activity_touch(pool_key);
 
     let query_timeout = resolve_query_timeout(options.timeout_secs);
-    let read_only_connection = {
-        let configs = state.configs.read().await;
-        let config = crate::connection::config_for_pool_key(pool_key, &configs);
-        config.filter(|config| config.read_only).map(|config| (config.name.clone(), config.db_type))
-    };
+    // Re-check at statement start so a write that becomes ready after the
+    // temporary unlock window expires is still blocked, even if an earlier
+    // statement in the same batch is still running.
+    check_read_only_for_connection(state, pool_key, sql).await?;
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
-    if let Some((name, database_type)) = read_only_connection {
-        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
-    }
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let connections = state.connections.read().await;
@@ -4597,6 +4642,12 @@ pub struct ManualTransactionExecutionOptions {
     pub table_data_preview: bool,
     pub page_size: Option<usize>,
     pub result_session_id: Option<String>,
+    /// User-facing SQL to classify (Oracle-only). When present, the core
+    /// classifies each split statement of this SQL rather than the rewritten
+    /// execution SQL, pairing them by count and position so DBX-owned
+    /// read-preserving rewrites (hidden primary keys, sort wrappers,
+    /// pagination) do not change toolbar semantics. Fail-closed on mismatch.
+    pub classification_sql: Option<String>,
 }
 
 pub async fn execute_in_manual_transaction_with_options(
@@ -4624,10 +4675,18 @@ pub async fn execute_in_manual_transaction_with_options(
         |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
     );
     if statements.is_empty() {
-        return Ok(vec![ExecuteMultiResult::success_with_optional_server_large_values(
+        // Oracle-only UX marker: the no-op is Core's decision that the script
+        // (empty/whitespace/comments-only) has no statements, so the frontend
+        // must not treat it as an unproven statement. Every other database
+        // receives the plain empty result.
+        let mut result = ExecuteMultiResult::success_with_optional_server_large_values(
             empty_query_result(0),
             options.table_data_preview,
-        )]);
+        );
+        if db_type == Some(DatabaseType::Oracle) {
+            result = result.with_manual_transaction_no_statement();
+        }
+        return Ok(vec![result]);
     }
     // A result-session cursor can only track one result set, so pagination is
     // single-statement only. Multi-statement scripts predate pagination: keep
@@ -4680,6 +4739,30 @@ pub async fn execute_in_manual_transaction_with_options(
     let row_limit = options.max_rows.unwrap_or(MAX_ROWS).max(1);
     let mut results = Vec::with_capacity(statements.len());
 
+    // Oracle-only classification pairing. The core splits both the execution
+    // SQL and, when present, the user-facing classification SQL with the same
+    // Oracle-aware splitter. A marker is emitted only when both lists have the
+    // same non-zero count and every paired user statement is proven read-only;
+    // any mismatch is fail-closed (no marker). This is deliberately a
+    // trust-boundary count/position pairing, not a SQL-equivalence parser.
+    let classification: Vec<bool> = if db_type == Some(DatabaseType::Oracle) {
+        match options.classification_sql.as_deref() {
+            Some(classification_sql) => {
+                let user_statements =
+                    crate::sql::split_sql_statements_for_database(classification_sql, DatabaseType::Oracle);
+                let paired = user_statements.len() == statements.len() && !user_statements.is_empty();
+                if paired {
+                    user_statements.iter().map(|statement| is_oracle_proven_read_only_statement(statement)).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
     let mut conn = connection.lock().await;
     for (i, statement) in statements.iter().enumerate() {
         let result = match &mut *conn {
@@ -4708,10 +4791,14 @@ pub async fn execute_in_manual_transaction_with_options(
         };
         match result {
             Ok(query_result) => {
-                results.push(ExecuteMultiResult::success_with_optional_server_large_values(
+                let mut executed = ExecuteMultiResult::success_with_optional_server_large_values(
                     query_result,
                     options.table_data_preview,
-                ));
+                );
+                if classification.get(i).copied().unwrap_or(false) {
+                    executed = executed.with_manual_transaction_proven_read_only();
+                }
+                results.push(executed);
             }
             Err(e) => {
                 // Statement failure ends the transaction. If another cleanup path
@@ -5321,6 +5408,24 @@ mod tests {
     }
 
     #[test]
+    fn execute_multi_result_manual_transaction_markers_serialize_conditionally() {
+        let plain = ExecuteMultiResult::success_with_optional_server_large_values(empty_query_result(0), false);
+        let plain_value = serde_json::to_value(&plain).unwrap();
+        assert!(plain_value.get("manual_transaction_proven_read_only").is_none());
+        assert!(plain_value.get("manual_transaction_no_statement").is_none());
+
+        let proven = plain.clone().with_manual_transaction_proven_read_only();
+        let proven_value = serde_json::to_value(&proven).unwrap();
+        assert_eq!(proven_value.get("manual_transaction_proven_read_only"), Some(&serde_json::Value::Bool(true)));
+        assert!(proven_value.get("manual_transaction_no_statement").is_none());
+
+        let no_statement = plain.with_manual_transaction_no_statement();
+        let no_statement_value = serde_json::to_value(&no_statement).unwrap();
+        assert_eq!(no_statement_value.get("manual_transaction_no_statement"), Some(&serde_json::Value::Bool(true)));
+        assert!(no_statement_value.get("manual_transaction_proven_read_only").is_none());
+    }
+
+    #[test]
     fn schema_diff_destructive_detection_covers_drop_and_alter_drop() {
         assert!(is_destructive_schema_diff_statement("DROP INDEX idx_users_email ON users"));
         assert!(is_destructive_schema_diff_statement("TRUNCATE TABLE audit_log"));
@@ -5633,6 +5738,7 @@ for line in sys.stdin:
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -7665,6 +7771,7 @@ for line in sys.stdin:
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),

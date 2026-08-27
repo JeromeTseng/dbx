@@ -135,7 +135,7 @@ function pasteGridCell(host: HTMLElement, value: string) {
   gridRoot.dispatchEvent(paste);
 }
 
-function mountGrid(initialResult = largeValueResult()) {
+function mountGrid(initialResult = largeValueResult(), onReload?: () => void) {
   const result = shallowRef(markRaw(initialResult));
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
   const pinia = createPinia();
@@ -169,6 +169,7 @@ function mountGrid(initialResult = largeValueResult()) {
                   primaryKeys: ["id"],
                 },
                 onExecuteSql,
+                ...(onReload ? { onReload } : {}),
               }),
           },
         );
@@ -223,6 +224,12 @@ function selectAllHeader(host: HTMLElement): HTMLElement {
   const header = host.querySelector<HTMLElement>(".data-grid-header-cell:not([data-grid-column-index])");
   if (!header) throw new Error("Select-all header not found");
   return header;
+}
+
+function rowNumber(host: HTMLElement, rowIndex = 0): HTMLElement {
+  const cell = host.querySelector<HTMLElement>(`[data-row-index="${rowIndex}"] .data-grid-row-number`);
+  if (!cell) throw new Error(`Row number not found: ${rowIndex}`);
+  return cell;
 }
 
 function openContextMenu(target: HTMLElement) {
@@ -295,6 +302,32 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(contextMenuLabels()).toContain("Freeze Selected Columns");
   });
 
+  it("offers snapshots for full-column selections from the column header", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(columnHeader(host, 1));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Screenshot selected columns");
+    contextMenuButton("Screenshot selected columns").click();
+    await settle();
+    expect(document.body.textContent).toContain("Grid Snapshot");
+  });
+
+  it("offers snapshots for full-row selections from the row number", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(rowNumber(host));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Screenshot selected rows");
+    contextMenuButton("Screenshot selected rows").click();
+    await settle();
+    expect(document.body.textContent).toContain("Grid Snapshot");
+  });
+
   it.each(["WHERE", "ORDER BY"] as const)("keeps the native context menu for the %s condition editor", async (placeholder) => {
     const { host } = mountGrid(hydratedResult(1, "value"));
     await settle();
@@ -318,6 +351,50 @@ describe("DataGrid context menu target lifecycle", () => {
     await settle();
 
     expect(contextMenuLabels()).toContain("Filter");
+  });
+
+  async function openGridSearchAndType(host: HTMLElement, query: string) {
+    await settle();
+    const gridRoot = host.querySelector<HTMLElement>("[data-grid-root]");
+    if (!gridRoot) throw new Error("Grid root not found");
+    gridRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("input[type=search]");
+    if (!input) throw new Error("Search input not found");
+    input.value = query;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    // useDataGridSearch 防抖 150ms，等待 deferredSearchText 生效
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+
+  it("marks the search overlay when truncated large values may hide matches (issue #7279)", async () => {
+    const { host } = mountGrid(largeValueResult(1, "preview"));
+    await openGridSearchAndType(host, "prev");
+    expect(host.querySelector("[data-grid-search-truncated-hint]")).toBeTruthy();
+  });
+
+  it("does not show the truncation hint for fully loaded values", async () => {
+    const { host } = mountGrid(hydratedResult(1, "preview"));
+    await openGridSearchAndType(host, "prev");
+    expect(host.querySelector("[data-grid-search-truncated-hint]")).toBeNull();
+  });
+
+  it("offers toolbar-equivalent refresh in the cell context menu (issue #7273)", async () => {
+    const onReload = vi.fn();
+    const { host } = mountGrid(hydratedResult(1, "value"), onReload);
+    await settle();
+    const cell = host.querySelector<HTMLElement>('[data-row-index="0"] [data-visible-col-index="1"]');
+    if (!cell) throw new Error("Grid cell not found");
+    openContextMenu(cell);
+    await settle();
+    // The item renders its label plus the Mod+R shortcut keys, so match by prefix.
+    const refreshLabels = contextMenuLabels().filter((label) => label.startsWith("Refresh"));
+    expect(refreshLabels.length).toBe(1);
+    const refreshButton = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((button) => button.textContent?.trim().startsWith("Refresh"));
+    refreshButton!.click();
+    await settle();
+    expect(onReload).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the native context menu for the expanded condition editor", async () => {
@@ -561,5 +638,36 @@ describe("DataGrid visible large-value preview lifecycle", () => {
     await settle();
 
     expect(visibleHydrationCalls()).toHaveLength(0);
+  });
+});
+
+describe("DataGrid DOM initial scroll position", () => {
+  it("keeps the first row visible while the virtual list finishes measuring", async () => {
+    const { host, replaceResult } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    const scroller = host.querySelector<HTMLElement>(".data-grid-scroller");
+    if (!scroller) throw new Error("Data grid scroller not found");
+    Object.defineProperties(scroller, {
+      scrollTop: { configurable: true, writable: true, value: 0 },
+      scrollWidth: { configurable: true, value: 1200 },
+      clientWidth: { configurable: true, value: 600 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollHeight: {
+        configurable: true,
+        get: () => (scroller.classList.contains("has-horizontal-scrollbar") ? 2600 : 500),
+      },
+    });
+
+    replaceResult({
+      columns: ["id", "payload"],
+      rows: Array.from({ length: 100 }, (_, index) => [index + 1, `row-${index + 1}`]),
+      affected_rows: 0,
+      execution_time_ms: 0,
+    });
+    await settle();
+
+    expect(scroller.classList.contains("has-horizontal-scrollbar")).toBe(true);
+    expect(scroller.scrollTop).toBe(0);
   });
 });

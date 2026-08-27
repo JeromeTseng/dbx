@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import * as api from "@/lib/backend/api";
 import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
 import { crossFamilyTransferableKinds, isSameTransferFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
@@ -651,8 +652,93 @@ function resetState(cancelTaskLoad = true) {
   savedConfigSnapshot.value = "";
 }
 
+/**
+ * 交换源和目标两侧：连接、Catalog、数据库、Schema 的选择随各自一侧整体互换，
+ * 一次点击即可反转传输方向。对象树只属于源端，旧选择作废，按新源端重新加载。
+ */
+function swapSourceAndTarget() {
+  const sourceState = {
+    connectionId: sourceConnectionId.value,
+    catalog: sourceCatalog.value,
+    catalogs: sourceCatalogs.value,
+    database: sourceDatabase.value,
+    databases: sourceDatabases.value,
+    schema: sourceSchema.value,
+    schemas: sourceSchemas.value,
+  };
+  const targetState = {
+    connectionId: targetConnectionId.value,
+    catalog: targetCatalog.value,
+    catalogs: targetCatalogs.value,
+    database: targetDatabase.value,
+    databases: targetDatabases.value,
+    schema: targetSchema.value,
+    schemas: targetSchemas.value,
+  };
+
+  if (sourceState.connectionId === targetState.connectionId && sourceState.catalog === targetState.catalog && sourceState.database === targetState.database && sourceState.schema === targetState.schema) {
+    // 两侧选择完全相同（含都未选择）时交换没有意义
+    return;
+  }
+
+  // 若正在加载已保存任务，先取消，避免任务加载链覆盖交换后的状态
+  taskLoadTracker.cancel();
+  pendingSourceSchemaPrefill.value = "";
+  pendingTargetSchemaPrefill.value = "";
+  pendingSelectedTablesPrefill.value = null;
+  pendingSelectedObjectsPrefill.value = null;
+
+  // 只在值确实变化时设置一次性跳过标记：标记由对应 watcher 消费，
+  // 若值未变则 watcher 不会触发，残留标记会误吞后续一次真实变更。
+  if (sourceConnectionId.value !== targetState.connectionId) {
+    skipSourceWatch.value = true;
+    sourceConnectionId.value = targetState.connectionId;
+  }
+  if (sourceCatalog.value !== targetState.catalog) {
+    skipSourceCatalogWatch.value = true;
+    sourceCatalog.value = targetState.catalog;
+  }
+  sourceCatalogs.value = targetState.catalogs;
+  if (sourceDatabase.value !== targetState.database) {
+    skipSourceDatabaseWatch.value = true;
+    sourceDatabase.value = targetState.database;
+  }
+  sourceDatabases.value = targetState.databases;
+  if (sourceSchema.value !== targetState.schema) {
+    skipSourceSchemaWatch.value = true;
+    sourceSchema.value = targetState.schema;
+  }
+  sourceSchemas.value = targetState.schemas;
+
+  if (targetConnectionId.value !== sourceState.connectionId) {
+    skipTargetWatch.value = true;
+    targetConnectionId.value = sourceState.connectionId;
+  }
+  if (targetCatalog.value !== sourceState.catalog) {
+    skipTargetCatalogWatch.value = true;
+    targetCatalog.value = sourceState.catalog;
+  }
+  targetCatalogs.value = sourceState.catalogs;
+  if (targetDatabase.value !== sourceState.database) {
+    skipTargetDatabaseWatch.value = true;
+    targetDatabase.value = sourceState.database;
+  }
+  targetDatabases.value = sourceState.databases;
+  targetSchema.value = sourceState.schema;
+  targetSchemas.value = sourceState.schemas;
+
+  // 对象树始终跟随源端：新源端是旧目标端，旧选择已无意义，清空后重新加载
+  objectGroups.value = {};
+  selectedObjects.value = {};
+  objectSearch.value = "";
+  void loadObjects();
+}
+
 async function startTransfer() {
   if (!canStart.value || isSubmitting.value) return;
+  if (!(await ensureReadOnlyWriteAccess({ connection: store.getConfig(targetConnectionId.value), source: t("readOnlyUnlock.sourceTransfer"), treatAsMutation: true }))) {
+    return;
+  }
   isSubmitting.value = true;
 
   const effectiveSourceSchema = sourceSchema.value || sourceDatabaseName.value;
@@ -1037,9 +1123,11 @@ async function saveConfigTask() {
                 </div>
               </div>
 
-              <!-- Arrow -->
+              <!-- Swap source / target -->
               <div class="flex items-center pt-8">
-                <ArrowLeftRight class="w-5 h-5 text-muted-foreground" />
+                <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('transfer.swap')" :aria-label="t('transfer.swap')" @click="swapSourceAndTarget">
+                  <ArrowLeftRight class="w-3.5 h-3.5" />
+                </Button>
               </div>
 
               <!-- Target Section -->
@@ -1269,10 +1357,8 @@ async function saveConfigTask() {
 </template>
 
 <style>
-@media (min-width: 640px) {
-  html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"] {
-    /* Override the legacy default cap without pinning width, so native resize remains effective. */
-    max-width: calc(100vw - 2rem) !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"] {
+  /* Override the legacy default cap without pinning width, so native resize remains effective. */
+  max-width: calc(100vw - 2rem) !important;
 }
 </style>

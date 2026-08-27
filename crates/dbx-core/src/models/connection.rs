@@ -94,6 +94,8 @@ pub struct ConnectionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_database_patterns: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_system_schemas: bool,
@@ -525,6 +527,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default)]
+    pub visible_database_patterns: Option<Vec<String>>,
+    #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
     pub show_system_schemas: bool,
@@ -626,6 +630,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             database: data.database,
             default_schema: data.default_schema,
             visible_databases: data.visible_databases,
+            visible_database_patterns: data.visible_database_patterns,
             visible_schemas: data.visible_schemas,
             show_system_schemas: data.show_system_schemas,
             attached_databases: data.attached_databases,
@@ -856,6 +861,11 @@ impl ConnectionConfig {
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Uxdb => Some("uxdb"),
             DatabaseType::Yashandb => Some("yasdb"),
+            DatabaseType::Oracle
+                if !self.oracle_connection_type.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("tns")) =>
+            {
+                Some("ORCL")
+            }
             DatabaseType::Oscar => Some("osrdb"),
             DatabaseType::Firebird => Some("employee"),
             DatabaseType::H2 => Some("test"),
@@ -1011,7 +1021,10 @@ impl ConnectionConfig {
                     return cs;
                 }
                 let mut suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                if is_tunneled && !suffix.contains("directConnection=") {
+                if is_tunneled
+                    && !suffix.contains("directConnection=")
+                    && !mongo_url_params_have_load_balanced_true(&suffix)
+                {
                     if suffix.is_empty() {
                         suffix = "?directConnection=true".to_string();
                     } else {
@@ -1179,7 +1192,10 @@ impl ConnectionConfig {
                     return cs;
                 }
                 let mut suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                if is_tunneled && !suffix.contains("directConnection=") {
+                if is_tunneled
+                    && !suffix.contains("directConnection=")
+                    && !mongo_url_params_have_load_balanced_true(&suffix)
+                {
                     if suffix.is_empty() {
                         suffix = "?directConnection=true".to_string();
                     } else {
@@ -2042,6 +2058,24 @@ fn mongo_url_param_is_direct_connection_true(part: &str) -> bool {
         && percent_decode_str(value).decode_utf8_lossy().eq_ignore_ascii_case("true")
 }
 
+fn mongo_url_param_is_load_balanced_true(part: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    percent_decode_str(key).decode_utf8_lossy().eq_ignore_ascii_case("loadBalanced")
+        && percent_decode_str(value).decode_utf8_lossy().eq_ignore_ascii_case("true")
+}
+
+fn mongo_uri_has_load_balanced_true(uri: &str) -> bool {
+    uri.split_once('?')
+        .map(|(_, query)| query.split('#').next().unwrap_or("").split('&').any(mongo_url_param_is_load_balanced_true))
+        .unwrap_or(false)
+}
+
+fn mongo_url_params_have_load_balanced_true(params: &str) -> bool {
+    params.trim_start_matches('?').split('&').any(mongo_url_param_is_load_balanced_true)
+}
+
 fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
     let value = value.trim_start_matches('?');
 
@@ -2284,7 +2318,9 @@ fn rewrite_mongo_uri_host(uri: &str, new_host: &str, new_port: u16) -> String {
 
     let mut result = format!("mongodb://{creds_prefix}{new_host}:{new_port}{after_hosts}");
 
-    if !result.contains("directConnection=") {
+    // loadBalanced=true requires directConnection to be unset or false, so a
+    // tunneled load-balanced endpoint must keep its original option set.
+    if !result.contains("directConnection=") && !mongo_uri_has_load_balanced_true(&result) {
         if result.contains('?') {
             result.push_str("&directConnection=true");
         } else {
@@ -2611,6 +2647,7 @@ mod tests {
             database: database.map(str::to_string),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -2804,6 +2841,20 @@ mod tests {
 
         config.db_type = DatabaseType::Postgres;
         assert_eq!(config.effective_database(), Some("postgres"));
+    }
+
+    #[test]
+    fn oracle_database_defaults_to_orcl_except_for_tns_aliases() {
+        let mut config = mysql_config("system", "oracle", None);
+        config.db_type = DatabaseType::Oracle;
+
+        for mode in [None, Some("service_name"), Some("sid")] {
+            config.oracle_connection_type = mode.map(str::to_string);
+            assert_eq!(config.effective_database(), Some("ORCL"));
+        }
+
+        config.oracle_connection_type = Some("tns".to_string());
+        assert_eq!(config.effective_database(), None);
     }
 
     fn mongodb_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
@@ -4221,6 +4272,26 @@ mod tests {
             url,
             "mongodb://read:pass@127.0.0.1:54321/admin?replicaSet=rs0&authSource=admin&directConnection=true"
         );
+    }
+
+    #[test]
+    fn mongodb_tunneled_connection_string_keeps_load_balanced_without_direct_connection() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.connection_string = Some("mongodb://read:pass@lb.example.net:27017/admin?loadBalanced=true".to_string());
+
+        let url = config.connection_url_with_host("127.0.0.1", 54321);
+
+        assert_eq!(url, "mongodb://read:pass@127.0.0.1:54321/admin?loadBalanced=true");
+    }
+
+    #[test]
+    fn mongodb_tunneled_form_url_keeps_load_balanced_without_direct_connection() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.url_params = Some("loadBalanced=true&authSource=admin".to_string());
+
+        let url = config.connection_url_with_host("127.0.0.1", 54321);
+
+        assert_eq!(url, "mongodb://root:secret@127.0.0.1:54321/admin?loadBalanced=true&authSource=admin");
     }
 
     #[test]

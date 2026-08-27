@@ -74,6 +74,7 @@ import {
   type ConnectionExportProtection,
 } from "@/lib/connection/connectionConfigTransfer";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import { usesOracleCurrentSchemaCompletion } from "@/lib/sql/oracleCompletionSession";
 import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -103,7 +104,7 @@ import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompa
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { disposeSqlServerActivityTracesForConnection, hasSqlServerActivityTraceForConnection } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection, visibleDatabasePatternsAreEnabled } from "@/lib/database/visibleDatabases";
 import {
   buildObjectGroupPlaceholderNodes,
   buildGroupedObjectTreeNodes,
@@ -141,7 +142,7 @@ import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { appendAgentDriverUpdateHint, connectionUsesSsh, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
-import { appendConnectionErrorHints, isMysqlMissingPasswordFailure } from "@/lib/connection/connectionErrorHints";
+import { appendConnectionErrorHints, isMysqlMissingPasswordFailure, isSqliteMissingEncryptionPasswordFailure } from "@/lib/connection/connectionErrorHints";
 import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
@@ -3441,6 +3442,26 @@ export const useConnectionStore = defineStore("connection", () => {
     await reloadConnectionDatabaseChildren(connectionId);
   }
 
+  // 显式勾选 + 通配符模式一并保存（#7164）：模式对之后新建的库持续生效
+  async function setVisibleDatabaseFilter(connectionId: string, databaseNames: string[], patterns: string[]) {
+    const config = getConfig(connectionId);
+    if (!config) return;
+    const normalizedPatterns = patterns.map((pattern) => pattern.trim()).filter((pattern) => pattern !== "");
+    const idx = connections.value.findIndex((connection) => connection.id === connectionId);
+    if (idx < 0) return;
+    const nextConnections = [...connections.value];
+    nextConnections[idx] = {
+      ...nextConnections[idx],
+      visible_databases: normalizeVisibleDatabaseSelection(databaseNames, databaseNames),
+      visible_database_patterns: normalizedPatterns.length > 0 ? normalizedPatterns : undefined,
+    };
+    await persistConnections(nextConnections);
+    connections.value = nextConnections;
+    invalidateCompletionCache(connectionId);
+    rebuildTreeNodes();
+    await reloadConnectionDatabaseChildren(connectionId);
+  }
+
   function recordPrimaryVisibleObjectNames(connectionId: string, objectNames: readonly string[]) {
     const names = [...objectNames];
     const existing = primaryVisibleObjectNames.value[connectionId];
@@ -3472,7 +3493,20 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function clearVisibleDatabases(connectionId: string) {
     const config = getConfig(connectionId);
-    if (!config || !Array.isArray(config.visible_databases)) return;
+    if (!config || (!Array.isArray(config.visible_databases) && !visibleDatabasePatternsAreEnabled(config.visible_database_patterns))) return;
+    if (visibleDatabasePatternsAreEnabled(config.visible_database_patterns)) {
+      const idx = connections.value.findIndex((connection) => connection.id === connectionId);
+      if (idx >= 0) {
+        const nextConnections = [...connections.value];
+        nextConnections[idx] = { ...nextConnections[idx], visible_databases: undefined, visible_database_patterns: undefined };
+        await persistConnections(nextConnections);
+        connections.value = nextConnections;
+        invalidateCompletionCache(connectionId);
+        rebuildTreeNodes();
+        await reloadConnectionDatabaseChildren(connectionId);
+        return;
+      }
+    }
     await updateVisibleDatabasesConfig(connectionId, undefined);
     await reloadConnectionDatabaseChildren(connectionId);
   }
@@ -3638,12 +3672,13 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
   }
 
-  async function connectDbWithMissingPasswordRetry(config: ConnectionConfig, localAttempt: number): Promise<{ config: ConnectionConfig; id: string; rememberPassword: boolean }> {
+  async function connectDbWithPasswordRetry(config: ConnectionConfig, localAttempt: number): Promise<{ config: ConnectionConfig; id: string; rememberPassword: boolean }> {
     try {
       const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
       return { config, id, rememberPassword: false };
     } catch (error) {
-      if (!isMysqlMissingPasswordFailure(config, connectionErrorMessage(error))) throw error;
+      const message = connectionErrorMessage(error);
+      if (!isMysqlMissingPasswordFailure(config, message) && !isSqliteMissingEncryptionPasswordFailure(config, message)) throw error;
       const prompted = await ensureConnectionPassword(config, true);
       config = prompted.config;
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
@@ -3669,7 +3704,7 @@ export const useConnectionStore = defineStore("connection", () => {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
       }
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
-      const connection = await connectDbWithMissingPasswordRetry(config, localAttempt);
+      const connection = await connectDbWithPasswordRetry(config, localAttempt);
       config = connection.config;
       rememberPassword ||= connection.rememberPassword;
       const id = connection.id;
@@ -3912,7 +3947,7 @@ export const useConnectionStore = defineStore("connection", () => {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
       }
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
-      const connection = await connectDbWithMissingPasswordRetry(config, localAttempt);
+      const connection = await connectDbWithPasswordRetry(config, localAttempt);
       config = connection.config;
       rememberPassword ||= connection.rememberPassword;
       const id = connection.id;
@@ -7807,11 +7842,11 @@ export const useConnectionStore = defineStore("connection", () => {
     const completionTable = uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
     const rawCompletionSchema = schema?.trim() || (config?.db_type === "dameng" ? config.username?.trim() || undefined : undefined);
     const completionSchema = uppercaseUnquotedIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
-    const usesOracleCurrentSchema = config?.db_type === "oracle" && !completionSchema;
-    if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !completionSchema && !usesOracleCurrentSchema) {
+    const usesCurrentSchema = usesOracleCurrentSchemaCompletion(config?.db_type, completionSchema);
+    if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !completionSchema && !usesCurrentSchema) {
       return [];
     }
-    const sessionCacheScope = usesOracleCurrentSchema && context?.clientSessionId ? `:${context.clientSessionId}:${context.version ?? 0}` : "";
+    const sessionCacheScope = usesCurrentSchema && context?.clientSessionId ? `:${context.clientSessionId}:${context.version ?? 0}` : "";
     const cacheKey = `${completionColumnsKey(connectionId, database, completionTable, completionSchema, catalog, context)}${sessionCacheScope}`;
     if (!completionColumnsCache.value[cacheKey]) {
       const requestRevision = completionCacheRevision(connectionId, database);
@@ -7820,7 +7855,7 @@ export const useConnectionStore = defineStore("connection", () => {
         async () => {
           await ensureConnected(connectionId);
           // Use assistant metadata opportunistically, then fall back to canonical metadata.
-          if (!usesOracleCurrentSchema && !catalog) {
+          if (!usesCurrentSchema && !catalog) {
             try {
               const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema, context, requestRevision);
               if (assistantColumns.length > 0) {
@@ -7845,8 +7880,8 @@ export const useConnectionStore = defineStore("connection", () => {
               // Fall back to the existing metadata path below.
             }
           }
-          const querySchema = usesOracleCurrentSchema ? "" : metadataQuerySchema(connectionId, database, completionSchema);
-          const columns = await api.getColumns(connectionId, database, querySchema, completionTable, catalog, usesOracleCurrentSchema ? context?.clientSessionId : undefined);
+          const querySchema = usesCurrentSchema ? "" : metadataQuerySchema(connectionId, database, completionSchema);
+          const columns = await api.getColumns(connectionId, database, querySchema, completionTable, catalog, usesCurrentSchema ? context?.clientSessionId : undefined);
           if (requestRevision !== completionCacheRevision(connectionId, database)) return;
           completionColumnsCache.value[cacheKey] = columns;
           evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
@@ -7867,7 +7902,7 @@ export const useConnectionStore = defineStore("connection", () => {
       isNullable: column.is_nullable,
       comment: column.comment,
     }));
-    if (!usesOracleCurrentSchema) indexCompletionColumns(connectionId, database, completionTable, completionSchema, columns, catalog, context);
+    if (!usesCurrentSchema) indexCompletionColumns(connectionId, database, completionTable, completionSchema, columns, catalog, context);
     return columns;
   }
 
@@ -8741,6 +8776,7 @@ export const useConnectionStore = defineStore("connection", () => {
     getRedisDatabaseAlias,
     setRedisDatabaseAlias,
     setVisibleDatabases,
+    setVisibleDatabaseFilter,
     clearVisibleDatabases,
     ensureVisibleDatabase,
     setVisibleSchemas,
