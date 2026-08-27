@@ -3121,6 +3121,26 @@ const sqliteWorkerPath = computed({
     form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker_path", value);
   },
 });
+const sqliteWorkerPlacementOptions = [
+  {
+    value: "session",
+    labelKey: "connection.sqliteWorkerPlacementSession",
+    hintKey: "connection.sqliteWorkerPlacementSessionHint",
+    recommended: true,
+  },
+  {
+    value: "persist",
+    labelKey: "connection.sqliteWorkerPlacementPersist",
+    hintKey: "connection.sqliteWorkerPlacementPersistHint",
+    recommended: false,
+  },
+  {
+    value: "preplaced",
+    labelKey: "connection.sqliteWorkerPlacementPreplaced",
+    hintKey: "connection.sqliteWorkerPlacementPreplacedHint",
+    recommended: false,
+  },
+] as const;
 const shouldShowSqliteSshWorkerInstallHint = computed(() => form.value.db_type === "sqlite" && sqliteUsesSsh.value && showAgentDriverInstallHint("sqlite", agentDrivers.value, form.value.driver_profile, { ssh: true }));
 const shouldShowAgentDriverInstallHint = computed(() => {
   if (form.value.db_type === "sqlite" && sqliteUsesSsh.value) return false;
@@ -6168,22 +6188,32 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div v-if="form.db_type === 'sqlite' && sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelTopClass">{{ t("connection.sqliteWorkerPlacement") }}</Label>
+                    <Label :class="[connectionLabelTopClass, 'gap-1']">
+                      {{ t("connection.sqliteWorkerPlacement") }}
+                      <HelpTooltip :label="t('connection.sqliteWorkerPlacementHint')">
+                        {{ t("connection.sqliteWorkerPlacementHint") }}
+                      </HelpTooltip>
+                    </Label>
                     <div class="col-span-3 space-y-2">
-                      <label class="flex items-start gap-2 text-sm">
-                        <input type="radio" class="mt-1" value="session" v-model="sqliteWorkerPlacement" />
-                        <span>{{ t("connection.sqliteWorkerPlacementSession") }}</span>
-                      </label>
-                      <label class="flex items-start gap-2 text-sm">
-                        <input type="radio" class="mt-1" value="persist" v-model="sqliteWorkerPlacement" />
-                        <span>{{ t("connection.sqliteWorkerPlacementPersist") }}</span>
-                      </label>
-                      <label class="flex items-start gap-2 text-sm">
-                        <input type="radio" class="mt-1" value="preplaced" v-model="sqliteWorkerPlacement" />
-                        <span>{{ t("connection.sqliteWorkerPlacementPreplaced") }}</span>
-                      </label>
+                      <div class="flex min-h-9 flex-wrap items-center gap-x-5 gap-y-2">
+                        <Tooltip v-for="option in sqliteWorkerPlacementOptions" :key="option.value" :delay-duration="0">
+                          <TooltipTrigger as-child>
+                            <label class="flex cursor-pointer items-center gap-1.5 text-sm">
+                              <input type="radio" name="sqlite-worker-placement" class="h-3.5 w-3.5 accent-primary" :value="option.value" v-model="sqliteWorkerPlacement" />
+                              <span>{{ t(option.labelKey) }}</span>
+                              <Badge v-if="option.recommended" class="h-4 rounded-full px-1.5 text-[10px] leading-none">{{ t("connection.sqliteWorkerPlacementDefault") }}</Badge>
+                            </label>
+                          </TooltipTrigger>
+                          <TooltipContent side="bottom" class="max-w-[18rem] flex-col items-start gap-1 py-2 text-left">
+                            <div class="flex items-center gap-1.5 font-medium">
+                              <span>{{ t(option.labelKey) }}</span>
+                              <Badge v-if="option.recommended" class="h-4 rounded-full px-1.5 text-[10px] leading-none">{{ t("connection.sqliteWorkerPlacementDefault") }}</Badge>
+                            </div>
+                            <p class="text-[11px] leading-relaxed text-background/80">{{ t(option.hintKey) }}</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
                       <Input v-if="sqliteWorkerPlacement !== 'session'" v-model="sqliteWorkerPath" :placeholder="sqliteWorkerPlacement === 'persist' ? t('connection.sqliteWorkerPersistPathPlaceholder') : t('connection.sqliteWorkerPreplacedPathPlaceholder')" />
-                      <p class="text-xs text-muted-foreground">{{ t("connection.sqliteWorkerPlacementHint") }}</p>
                       <p v-if="shouldShowSqliteSshWorkerInstallHint" class="text-xs text-muted-foreground">
                         {{ t("connection.driverInstallHintPrefix") }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore', agentDriverFocus)">{{ t("toolbar.driverManager") }}</a
                         >{{ t("connection.driverInstallHintSuffix") }}
