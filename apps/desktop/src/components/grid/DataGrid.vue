@@ -14086,7 +14086,7 @@ function openGridSnapshot() {
               count: result.rows.length,
             })
           }}
-          <i18n-t v-if="showRerunTotalCountAction && !(totalRowCountBusy && !manualTotalRowCountLoading)" keypath="grid.totalRowCountWithAction" tag="span" class="text-muted-foreground/70" :values="{ count: displayedTotalRowCount }">
+          <i18n-t v-if="showRerunTotalCountAction && !(totalRowCountBusy && !manualTotalRowCountLoading)" keypath="grid.totalRowCountWithAction" tag="span" class="text-muted-foreground/70">
             <template #button>
               <button
                 type="button"
@@ -14101,6 +14101,7 @@ function openGridSnapshot() {
                 <RefreshCcw v-else aria-hidden="true" class="h-3 w-3" />
               </button>
             </template>
+            <template #count>{{ displayedTotalRowCount }}</template>
           </i18n-t>
           <span v-else-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountLabelKey, { count: displayedTotalRowCount }) }}</span>
           <span v-if="totalRowCountBusy && !(showRerunTotalCountAction && manualTotalRowCountLoading)" class="text-muted-foreground/70">
