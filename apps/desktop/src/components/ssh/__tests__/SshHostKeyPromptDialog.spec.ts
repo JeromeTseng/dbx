@@ -247,17 +247,17 @@ describe("SshHostKeyPromptDialog web bridge", () => {
       request: {
         id: "worker-1",
         kind: "WorkerUploadConsent",
-        host: "118.178.94.91",
+        host: "203.0.113.10",
         port: 22,
         fingerprint: "08ca4746e8fbf97038a93105d3ef023112e3f66bc097869401628c00acea7709",
-        prompt: "/root/.cache/dbx/sqlite-worker/session-ebd207de-8f26cd6e-08ca4746e8fbf97038a93105d3ef023112e3f66bc097869401628c00acea7709",
+        prompt: "/home/testuser/.cache/dbx/sqlite-worker/session-ebd207de-8f26cd6e-08ca4746e8fbf97038a93105d3ef023112e3f66bc097869401628c00acea7709",
       },
     });
     await nextTick();
 
-    expect(document.body.textContent).toContain("118.178.94.91:22");
+    expect(document.body.textContent).toContain("203.0.113.10:22");
     expect(document.body.textContent).toContain("08ca4746e8fbf97038a93105d3ef023112e3f66bc097869401628c00acea7709");
-    expect(document.body.textContent).toContain("/root/.cache/dbx/sqlite-worker/");
+    expect(document.body.textContent).toContain("/home/testuser/.cache/dbx/sqlite-worker/");
     expect(dialogSource).toContain("break-all");
     expect(dialogSource).toContain("shrink-0");
 

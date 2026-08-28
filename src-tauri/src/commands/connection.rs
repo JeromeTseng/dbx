@@ -386,14 +386,14 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_ssh_config_does_not_open_the_remote_path_as_a_local_file() {
-        let mut config = sqlite_config(std::path::Path::new("/home/sl651/data/messages.db"), "");
+        let mut config = sqlite_config(std::path::Path::new("/remote/data/app.db"), "");
         config.transport_layers = serde_json::from_value(serde_json::json!([{
             "type": "ssh",
             "id": "hop-1",
             "enabled": true,
-            "host": "118.178.94.91",
+            "host": "203.0.113.10",
             "port": 22,
-            "user": "root"
+            "user": "testuser"
         }]))
         .expect("ssh layer");
 
