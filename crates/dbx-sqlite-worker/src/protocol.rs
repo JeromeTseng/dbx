@@ -32,6 +32,8 @@ pub enum WorkerBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         columns: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        column_types: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         rows: Option<Vec<Vec<serde_json::Value>>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         affected_rows: Option<u64>,
@@ -47,16 +49,23 @@ pub enum WorkerBody {
 
 impl WorkerBody {
     pub fn ok() -> Self {
-        Self::Ok { columns: None, rows: None, affected_rows: None, truncated: None, pong: None }
+        Self::Ok { columns: None, column_types: None, rows: None, affected_rows: None, truncated: None, pong: None }
     }
 
     pub fn pong() -> Self {
-        Self::Ok { columns: None, rows: None, affected_rows: None, truncated: None, pong: Some(true) }
+        Self::Ok { columns: None, column_types: None, rows: None, affected_rows: None, truncated: None, pong: Some(true) }
     }
 
-    pub fn query(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, affected_rows: u64, truncated: bool) -> Self {
+    pub fn query(
+        columns: Vec<String>,
+        column_types: Vec<String>,
+        rows: Vec<Vec<serde_json::Value>>,
+        affected_rows: u64,
+        truncated: bool,
+    ) -> Self {
         Self::Ok {
             columns: Some(columns),
+            column_types: if column_types.iter().any(|ty| !ty.is_empty()) { Some(column_types) } else { None },
             rows: Some(rows),
             affected_rows: Some(affected_rows),
             truncated: Some(truncated),

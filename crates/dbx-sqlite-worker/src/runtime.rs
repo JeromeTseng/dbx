@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use crate::protocol::{WorkerBody, WorkerOp, WorkerRequest, WorkerResponse};
 
+const MAX_BLOB_BYTES: usize = 512 * 1024;
+const MAX_RESPONSE_JSON_BYTES: usize = 8 * 1024 * 1024;
+
 pub fn run_stdio() -> Result<(), String> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -86,7 +89,7 @@ fn query(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody {
         query_statement(conn, trimmed, max_rows)
     } else {
         match conn.execute_batch(trimmed) {
-            Ok(()) => WorkerBody::query(Vec::new(), Vec::new(), conn.changes(), false),
+            Ok(()) => WorkerBody::query(Vec::new(), Vec::new(), Vec::new(), conn.changes(), false),
             Err(error) => WorkerBody::err(error.to_string()),
         }
     }
@@ -141,13 +144,18 @@ fn query_statement(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody 
             let column_count = stmt.column_count();
             if column_count == 0 {
                 return match stmt.execute([]) {
-                    Ok(changed) => WorkerBody::query(Vec::new(), Vec::new(), changed as u64, false),
+                    Ok(changed) => WorkerBody::query(Vec::new(), Vec::new(), Vec::new(), changed as u64, false),
                     Err(error) => WorkerBody::err(error.to_string()),
                 };
             }
             let columns = stmt.column_names().iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
+            let column_decl_types =
+                stmt.columns().iter().map(|column| column.decl_type().map(str::to_string)).collect::<Vec<_>>();
+            let column_types =
+                column_decl_types.iter().map(|decl| decl.clone().unwrap_or_default()).collect::<Vec<_>>();
             let mut rows = Vec::new();
             let mut truncated = false;
+            let mut encoded_bytes = 0usize;
             match stmt.query([]) {
                 Ok(mut mapped) => {
                     while let Ok(Some(row)) = mapped.next() {
@@ -158,16 +166,27 @@ fn query_statement(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody 
                         let mut values = Vec::with_capacity(columns.len());
                         for index in 0..columns.len() {
                             match row.get_ref(index) {
-                                Ok(value) => values.push(value_to_json(value)),
+                                Ok(value) => {
+                                    let (json, blob_truncated) =
+                                        value_to_json(value, column_decl_types.get(index).and_then(Option::as_deref));
+                                    truncated |= blob_truncated;
+                                    values.push(json);
+                                }
                                 Err(error) => return WorkerBody::err(error.to_string()),
                             }
                         }
+                        let row_size = serde_json::to_vec(&values).map(|encoded| encoded.len()).unwrap_or(0);
+                        if !rows.is_empty() && encoded_bytes + row_size > MAX_RESPONSE_JSON_BYTES {
+                            truncated = true;
+                            break;
+                        }
+                        encoded_bytes += row_size;
                         rows.push(values);
                     }
                 }
                 Err(error) => return WorkerBody::err(error.to_string()),
             }
-            WorkerBody::query(columns, rows, 0, truncated)
+            WorkerBody::query(columns, column_types, rows, 0, truncated)
         }
         Err(error) => WorkerBody::err(error.to_string()),
     }
@@ -200,14 +219,40 @@ fn restore(conn: &mut Connection, src: &str) -> WorkerBody {
     }
 }
 
-fn value_to_json(value: rusqlite::types::ValueRef<'_>) -> serde_json::Value {
+fn value_to_json(value: rusqlite::types::ValueRef<'_>, column_decl_type: Option<&str>) -> (serde_json::Value, bool) {
     match value {
-        rusqlite::types::ValueRef::Null => json!(null),
-        rusqlite::types::ValueRef::Integer(value) => json!(value),
-        rusqlite::types::ValueRef::Real(value) => json!(value),
-        rusqlite::types::ValueRef::Text(value) => json!(String::from_utf8_lossy(value)),
-        rusqlite::types::ValueRef::Blob(value) => json!({ "$blob": value }),
+        rusqlite::types::ValueRef::Null => (json!(null), false),
+        rusqlite::types::ValueRef::Integer(value) => (json!(value), false),
+        rusqlite::types::ValueRef::Real(value) => (json!(value), false),
+        rusqlite::types::ValueRef::Text(value) => (json!(String::from_utf8_lossy(value)), false),
+        rusqlite::types::ValueRef::Blob(value) => sqlite_blob_value_to_json(value, column_decl_type),
     }
+}
+
+fn sqlite_blob_value_to_json(bytes: &[u8], column_decl_type: Option<&str>) -> (serde_json::Value, bool) {
+    if is_sqlite_text_affinity(column_decl_type) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return (json!(text), false);
+        }
+    }
+    let truncated = bytes.len() > MAX_BLOB_BYTES;
+    let encoded = &bytes[..bytes.len().min(MAX_BLOB_BYTES)];
+    (json!(format!("0x{}", hex_encode(encoded))), truncated)
+}
+
+fn is_sqlite_text_affinity(column_decl_type: Option<&str>) -> bool {
+    let upper = column_decl_type.unwrap_or("").to_ascii_uppercase();
+    upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT")
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -335,6 +380,46 @@ mod tests {
         assert!(sqlite_statement_returns_rows("INSERT INTO t VALUES (1) RETURNING id"));
         assert!(!sqlite_statement_returns_rows("CREATE TABLE t(id INTEGER); INSERT INTO t VALUES (1);"));
         assert!(!sqlite_statement_returns_rows("INSERT INTO t VALUES (1)"));
+    }
+
+    #[test]
+    fn blobs_are_hex_and_text_affinity_columns_show_as_text() {
+        let dir = std::env::temp_dir().join(format!("dbx-sqlite-worker-blob-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("app.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("CREATE TABLE t (bin BLOB, note TEXT); INSERT INTO t VALUES (x'0001ab', x'6869');")
+                .unwrap();
+        }
+        let mut connection = None;
+        handle(&mut connection, WorkerRequest { id: 1, op: WorkerOp::Open { path: db.to_string_lossy().into() } });
+        let select = handle(
+            &mut connection,
+            WorkerRequest { id: 2, op: WorkerOp::Query { sql: "SELECT bin, note FROM t".into(), max_rows: Some(10) } },
+        );
+        match select.body {
+            WorkerBody::Ok { rows, column_types, truncated, .. } => {
+                assert_eq!(column_types.as_deref(), Some(["BLOB".to_string(), "TEXT".to_string()].as_slice()));
+                assert_eq!(truncated, Some(false));
+                let rows = rows.expect("rows");
+                assert_eq!(rows[0][0], json!("0x0001ab"));
+                assert_eq!(rows[0][1], json!("hi"));
+            }
+            WorkerBody::Err { error } => panic!("{error}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn oversized_blobs_truncate_hex_output() {
+        assert_eq!(sqlite_blob_value_to_json(&[0x00, 0x01, 0xab], None), (json!("0x0001ab"), false));
+        let big = vec![0xFFu8; MAX_BLOB_BYTES + 1];
+        let (value, truncated) = sqlite_blob_value_to_json(&big, None);
+        assert!(truncated);
+        let hex = value.as_str().expect("hex string");
+        assert!(hex.starts_with("0x"));
+        assert_eq!(hex.len(), 2 + MAX_BLOB_BYTES * 2);
     }
 
     fn uuid_like() -> String {

@@ -9,7 +9,7 @@ use dbx_sqlite_worker::{WorkerBody, WorkerOp, WorkerRequest, WorkerResponse};
 use russh::client::Handle;
 use russh::ChannelMsg;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -22,6 +22,7 @@ use crate::types::QueryResult;
 const WORKER_PATH_ENV: &str = "DBX_SQLITE_WORKER_PATH";
 const DEFAULT_PERSIST_DIR: &str = "~/.cache/dbx/sqlite-worker";
 const CONSENT_FILE_NAME: &str = "sqlite-worker-consent.json";
+const SQLITE_WORKER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 static SQLITE_SSH_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn sqlite_worker_chain_id(connection_id: &str) -> String {
@@ -96,7 +97,7 @@ enum WorkerIo {
         stdout: BufReader<tokio::process::ChildStdout>,
     },
     Ssh {
-        stream: DynStream,
+        stream: BufReader<DynStream>,
     },
     Closed,
 }
@@ -104,9 +105,9 @@ enum WorkerIo {
 impl SqliteWorkerClient {
     pub async fn query(&self, sql: &str, max_rows: Option<usize>) -> Result<QueryResult, String> {
         match self.roundtrip(WorkerOp::Query { sql: sql.to_string(), max_rows }).await? {
-            WorkerBody::Ok { columns, rows, affected_rows, truncated, .. } => Ok(QueryResult {
+            WorkerBody::Ok { columns, column_types, rows, affected_rows, truncated, .. } => Ok(QueryResult {
                 columns: columns.unwrap_or_default(),
-                column_types: Vec::new(),
+                column_types: column_types.unwrap_or_default(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
                 spatial_values: vec![],
@@ -177,7 +178,7 @@ impl SqliteWorkerClient {
         };
         match previous {
             WorkerIo::Ssh { mut stream } => {
-                let _ = stream.shutdown().await;
+                let _ = stream.get_mut().shutdown().await;
             }
             WorkerIo::Process { mut child, .. } => {
                 let _ = child.start_kill();
@@ -220,22 +221,7 @@ impl SqliteWorkerClient {
             WorkerIo::Ssh { stream, .. } => {
                 stream.write_all(&encoded).await.map_err(|e| e.to_string())?;
                 stream.flush().await.map_err(|e| e.to_string())?;
-                let mut line = Vec::new();
-                loop {
-                    let mut byte = [0u8; 1];
-                    stream
-                        .read_exact(&mut byte)
-                        .await
-                        .map_err(|e| format!("SQLite worker closed the SSH session: {e}"))?;
-                    if byte[0] == b'\n' {
-                        break;
-                    }
-                    line.push(byte[0]);
-                    if line.len() > 16 * 1024 * 1024 {
-                        return Err("SQLite worker response exceeded 16 MiB".to_string());
-                    }
-                }
-                parse_response(id, &String::from_utf8_lossy(&line))
+                parse_response(id, &read_jsonl_line(stream).await?)
             }
         }
     }
@@ -273,6 +259,31 @@ fn parse_response(id: u64, line: &str) -> Result<WorkerBody, String> {
         return Err(format!("SQLite worker response id {} did not match {id}", response.id));
     }
     Ok(response.body)
+}
+
+async fn read_jsonl_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<String, String> {
+    let mut line = Vec::new();
+    loop {
+        let buf = reader.fill_buf().await.map_err(|e| format!("SQLite worker closed the SSH session: {e}"))?;
+        if buf.is_empty() {
+            return Err("SQLite worker closed the SSH session".to_string());
+        }
+        if let Some(newline) = buf.iter().position(|&byte| byte == b'\n') {
+            if line.len() + newline > SQLITE_WORKER_MAX_RESPONSE_BYTES {
+                return Err("SQLite worker response exceeded 16 MiB".to_string());
+            }
+            line.extend_from_slice(&buf[..=newline]);
+            reader.consume(newline + 1);
+            break;
+        }
+        if line.len() + buf.len() > SQLITE_WORKER_MAX_RESPONSE_BYTES {
+            return Err("SQLite worker response exceeded 16 MiB".to_string());
+        }
+        let consumed = buf.len();
+        line.extend_from_slice(buf);
+        reader.consume(consumed);
+    }
+    Ok(String::from_utf8_lossy(&line).into_owned())
 }
 
 pub async fn connect_sqlite_worker(
@@ -366,7 +377,7 @@ pub async fn connect_sqlite_worker(
             .map_err(|e| format!("failed to start SQLite worker: {e}"))?;
         let stream: DynStream = Box::pin(channel.into_stream());
         let client = SqliteWorkerClient {
-            io: AsyncMutex::new(WorkerIo::Ssh { stream }),
+            io: AsyncMutex::new(WorkerIo::Ssh { stream: BufReader::new(stream) }),
             next_id: AtomicU64::new(1),
             ssh_session: Some(Arc::clone(&session)),
             remove_remote_path: remove_remote_on_close.then(|| remote_path.clone()),
@@ -781,6 +792,19 @@ mod tests {
         assert!(remote_sqlite_exists_from_output("/remote/data/app.db", "ok\n").is_ok());
         let error = remote_sqlite_exists_from_output("/remote/data/app.db", "").unwrap_err();
         assert!(error.contains("File does not exist"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn read_jsonl_line_stops_at_newline_and_enforces_size_cap() {
+        let mut reader = BufReader::new(&b"{\"id\":1}\nleftover"[..]);
+        let line = read_jsonl_line(&mut reader).await.unwrap();
+        assert_eq!(line, "{\"id\":1}\n");
+
+        let mut oversized = vec![b'a'; SQLITE_WORKER_MAX_RESPONSE_BYTES + 1];
+        oversized.push(b'\n');
+        let mut reader = BufReader::new(oversized.as_slice());
+        let error = read_jsonl_line(&mut reader).await.unwrap_err();
+        assert!(error.contains("16 MiB"), "{error}");
     }
 
     #[test]
