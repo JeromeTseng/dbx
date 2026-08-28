@@ -1,5 +1,8 @@
 use rusqlite::{Connection, DatabaseName, OpenFlags};
 use serde_json::json;
+use sqlparser::ast::Statement;
+use sqlparser::dialect::SQLiteDialect;
+use sqlparser::parser::Parser;
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -79,7 +82,61 @@ fn query(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody {
     if trimmed.is_empty() {
         return WorkerBody::err("SQL is empty");
     }
-    match conn.prepare(trimmed) {
+    if sqlite_statement_returns_rows(trimmed) {
+        query_statement(conn, trimmed, max_rows)
+    } else {
+        match conn.execute_batch(trimmed) {
+            Ok(()) => WorkerBody::query(Vec::new(), Vec::new(), conn.changes(), false),
+            Err(error) => WorkerBody::err(error.to_string()),
+        }
+    }
+}
+
+fn sqlite_statement_returns_rows(sql: &str) -> bool {
+    if sqlite_starts_with_keyword(sql, &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]) {
+        return true;
+    }
+    let Ok(statements) = Parser::parse_sql(&SQLiteDialect {}, sql) else {
+        return false;
+    };
+    let [statement] = statements.as_slice() else {
+        return false;
+    };
+    match statement {
+        Statement::Insert(insert) => insert.returning.is_some(),
+        Statement::Update(update) => update.returning.is_some(),
+        Statement::Delete(delete) => delete.returning.is_some(),
+        _ => false,
+    }
+}
+
+fn sqlite_starts_with_keyword(sql: &str, keywords: &[&str]) -> bool {
+    let rest = skip_sqlite_trivia(sql);
+    keywords.iter().any(|keyword| {
+        rest.len() >= keyword.len()
+            && rest[..keyword.len()].eq_ignore_ascii_case(keyword)
+            && rest.as_bytes().get(keyword.len()).is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+    })
+}
+
+fn skip_sqlite_trivia(sql: &str) -> &str {
+    let mut rest = sql.trim_start();
+    loop {
+        if rest.starts_with("--") {
+            rest = rest.split_once('\n').map(|(_, tail)| tail).unwrap_or("").trim_start();
+            continue;
+        }
+        if let Some(rest_of_block) = rest.strip_prefix("/*") {
+            rest = rest_of_block.split_once("*/").map(|(_, tail)| tail).unwrap_or("").trim_start();
+            continue;
+        }
+        break;
+    }
+    rest
+}
+
+fn query_statement(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody {
+    match conn.prepare(sql) {
         Ok(mut stmt) => {
             let column_count = stmt.column_count();
             if column_count == 0 {
@@ -112,10 +169,7 @@ fn query(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody {
             }
             WorkerBody::query(columns, rows, 0, truncated)
         }
-        Err(_) => match conn.execute_batch(trimmed) {
-            Ok(()) => WorkerBody::query(Vec::new(), Vec::new(), conn.changes(), false),
-            Err(error) => WorkerBody::err(error.to_string()),
-        },
+        Err(error) => WorkerBody::err(error.to_string()),
     }
 }
 
@@ -211,6 +265,76 @@ mod tests {
             other => panic!("expected missing-file error, got {other:?}"),
         }
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn multi_statement_scripts_run_every_statement() {
+        let dir = std::env::temp_dir().join(format!("dbx-sqlite-worker-multi-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("app.db");
+        rusqlite::Connection::open(&db).unwrap();
+        let mut connection = None;
+        let open =
+            handle(&mut connection, WorkerRequest { id: 1, op: WorkerOp::Open { path: db.to_string_lossy().into() } });
+        assert!(matches!(open.body, WorkerBody::Ok { .. }));
+        let script = handle(
+            &mut connection,
+            WorkerRequest {
+                id: 2,
+                op: WorkerOp::Query {
+                    sql: "CREATE TABLE t(id INTEGER); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);".into(),
+                    max_rows: None,
+                },
+            },
+        );
+        assert!(matches!(script.body, WorkerBody::Ok { .. }), "{script:?}");
+        let select = handle(
+            &mut connection,
+            WorkerRequest { id: 3, op: WorkerOp::Query { sql: "SELECT id FROM t ORDER BY id".into(), max_rows: Some(10) } },
+        );
+        match select.body {
+            WorkerBody::Ok { rows, .. } => {
+                let rows = rows.expect("rows");
+                assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
+            }
+            WorkerBody::Err { error } => panic!("{error}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn returning_dml_still_produces_a_result_set() {
+        let dir = std::env::temp_dir().join(format!("dbx-sqlite-worker-returning-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("app.db");
+        rusqlite::Connection::open(&db).unwrap();
+        let mut connection = None;
+        handle(&mut connection, WorkerRequest { id: 1, op: WorkerOp::Open { path: db.to_string_lossy().into() } });
+        handle(
+            &mut connection,
+            WorkerRequest { id: 2, op: WorkerOp::Query { sql: "CREATE TABLE t(id INTEGER)".into(), max_rows: None } },
+        );
+        let insert = handle(
+            &mut connection,
+            WorkerRequest {
+                id: 3,
+                op: WorkerOp::Query { sql: "INSERT INTO t VALUES (7) RETURNING id".into(), max_rows: Some(10) },
+            },
+        );
+        match insert.body {
+            WorkerBody::Ok { rows, .. } => assert_eq!(rows.unwrap()[0][0], json!(7)),
+            WorkerBody::Err { error } => panic!("{error}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sqlite_statement_returns_rows_classifies_scripts() {
+        assert!(sqlite_statement_returns_rows("SELECT 1"));
+        assert!(sqlite_statement_returns_rows("-- comment\nWITH x AS (SELECT 1) SELECT * FROM x"));
+        assert!(sqlite_statement_returns_rows("INSERT INTO t VALUES (1) RETURNING id"));
+        assert!(!sqlite_statement_returns_rows("CREATE TABLE t(id INTEGER); INSERT INTO t VALUES (1);"));
+        assert!(!sqlite_statement_returns_rows("INSERT INTO t VALUES (1)"));
     }
 
     fn uuid_like() -> String {

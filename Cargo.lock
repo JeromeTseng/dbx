@@ -2179,6 +2179,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sqlparser",
 ]
 
 [[package]]
