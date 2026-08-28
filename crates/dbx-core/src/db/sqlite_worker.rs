@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use dbx_sqlite_worker::{WorkerBody, WorkerOp, WorkerRequest, WorkerResponse};
 use russh::client::Handle;
+use russh::ChannelMsg;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
@@ -572,13 +573,8 @@ async fn ssh_download_file(session: &Handle<SshClient>, remote: &str, dest: &Pat
 async fn ssh_upload_file(session: &Handle<SshClient>, src: &Path, remote: &str) -> Result<(), String> {
     let quoted = shell_quote(remote);
     let command = format!("mkdir -p \"$(dirname {quoted})\" && cat > {quoted}.part && mv {quoted}.part {quoted}");
-    let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
-    channel.exec(true, command).await.map_err(|e| e.to_string())?;
-    let mut stream = channel.into_stream();
     let mut file = tokio::fs::File::open(src).await.map_err(|e| format!("failed to read local restore file: {e}"))?;
-    tokio::io::copy(&mut file, &mut stream).await.map_err(|e| format!("failed to upload SQLite restore file: {e}"))?;
-    stream.shutdown().await.map_err(|e| e.to_string())?;
-    Ok(())
+    ssh_exec_with_stdin(session, command, &mut file).await
 }
 
 async fn ssh_remove_file(session: &Handle<SshClient>, path: &str) -> Result<(), String> {
@@ -623,12 +619,36 @@ async fn upload_worker(session: &Handle<SshClient>, dest: &str, bytes: &[u8]) ->
     let quoted = shell_quote(dest);
     let command =
         format!("mkdir -p \"$(dirname {quoted})\" && cat > {quoted}.part && chmod 700 {quoted}.part && mv {quoted}.part {quoted}");
-    let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
+    ssh_exec_with_stdin(session, command, bytes).await
+}
+
+async fn ssh_exec_with_stdin<R: tokio::io::AsyncRead + Unpin>(
+    session: &Handle<SshClient>,
+    command: String,
+    stdin: R,
+) -> Result<(), String> {
+    let mut channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
     channel.exec(true, command).await.map_err(|e| e.to_string())?;
-    let mut stream = channel.into_stream();
-    stream.write_all(bytes).await.map_err(|e| e.to_string())?;
-    stream.shutdown().await.map_err(|e| e.to_string())?;
-    Ok(())
+    channel.data(stdin).await.map_err(|e| e.to_string())?;
+    channel.eof().await.map_err(|e| e.to_string())?;
+    let mut exit_status = None;
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::ExitStatus { exit_status: status }) => exit_status = Some(status),
+            Some(ChannelMsg::Close) | None => break,
+            Some(ChannelMsg::Eof | ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. }) => {}
+            Some(_) => {}
+        }
+    }
+    remote_exec_status(exit_status)
+}
+
+fn remote_exec_status(exit_status: Option<u32>) -> Result<(), String> {
+    match exit_status {
+        Some(0) => Ok(()),
+        Some(code) => Err(format!("remote command exited with status {code}")),
+        None => Err("remote command closed without an exit status".to_string()),
+    }
 }
 
 async fn verify_remote_digest(session: &Handle<SshClient>, path: &str, digest: &str) -> Result<(), String> {
@@ -728,6 +748,13 @@ mod tests {
     #[test]
     fn sqlite_worker_chain_id_is_distinct_from_connection_id() {
         assert_eq!(sqlite_worker_chain_id("conn-1"), "conn-1:sqlite-worker");
+    }
+
+    #[test]
+    fn remote_exec_status_waits_for_a_successful_exit() {
+        assert!(remote_exec_status(Some(0)).is_ok());
+        assert!(remote_exec_status(Some(1)).unwrap_err().contains("status 1"));
+        assert!(remote_exec_status(None).unwrap_err().contains("without an exit status"));
     }
 
     #[test]
