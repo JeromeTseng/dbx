@@ -23,6 +23,10 @@ const DEFAULT_PERSIST_DIR: &str = "~/.cache/dbx/sqlite-worker";
 const CONSENT_FILE_NAME: &str = "sqlite-worker-consent.json";
 static SQLITE_SSH_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(false);
 
+pub fn sqlite_worker_chain_id(connection_id: &str) -> String {
+    format!("{connection_id}:sqlite-worker")
+}
+
 pub fn enable_sqlite_ssh_runtime(_app_version: impl Into<String>) {
     SQLITE_SSH_RUNTIME_ENABLED.store(true, Ordering::SeqCst);
 }
@@ -292,6 +296,7 @@ pub async fn connect_sqlite_worker(
     }
 
     let hops = ssh_hops(transport_layers)?;
+    let chain_id = (hops.len() > 1).then(|| sqlite_worker_chain_id(connection_id));
     let db_path = config.host.trim();
     if db_path.is_empty() {
         return Err("Remote SQLite path is empty".to_string());
@@ -372,6 +377,9 @@ pub async fn connect_sqlite_worker(
         Err(error) => {
             if remove_remote_on_close {
                 remove_uploaded_session_worker(session.as_ref(), &remote_path).await;
+            }
+            if let Some(chain_id) = chain_id.as_deref() {
+                tunnels.stop_tunnel(chain_id).await;
             }
             Err(error)
         }
@@ -482,10 +490,9 @@ async fn open_final_hop_session(
         )
         .await;
     }
-    let local_port = tunnels
-        .start_chain(&format!("{connection_id}:sqlite-worker"), &hops[..hops.len() - 1], &last.host, last.port)
-        .await?;
-    ssh_tunnel::connect_and_authenticate(
+    let chain_id = sqlite_worker_chain_id(connection_id);
+    let local_port = tunnels.start_chain(&chain_id, &hops[..hops.len() - 1], &last.host, last.port).await?;
+    match ssh_tunnel::connect_and_authenticate(
         "127.0.0.1",
         local_port,
         &last.host,
@@ -501,6 +508,13 @@ async fn open_final_hop_session(
         tunnels.known_hosts_path(),
     )
     .await
+    {
+        Ok(session) => Ok(session),
+        Err(error) => {
+            tunnels.stop_tunnel(&chain_id).await;
+            Err(error)
+        }
+    }
 }
 
 async fn remote_linux_platform(session: &Handle<SshClient>) -> Result<String, String> {
@@ -709,6 +723,11 @@ mod tests {
         assert_eq!(linux_platform_from_uname("aarch64").unwrap(), "linux-aarch64");
         assert_eq!(linux_platform_from_uname("arm64").unwrap(), "linux-aarch64");
         assert!(linux_platform_from_uname("ppc64le").unwrap_err().contains("ppc64le"));
+    }
+
+    #[test]
+    fn sqlite_worker_chain_id_is_distinct_from_connection_id() {
+        assert_eq!(sqlite_worker_chain_id("conn-1"), "conn-1:sqlite-worker");
     }
 
     #[test]
