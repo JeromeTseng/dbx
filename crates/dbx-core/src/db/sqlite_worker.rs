@@ -350,13 +350,14 @@ pub async fn connect_sqlite_worker(
         SqliteWorkerPlacement::Session => expand_home(&session_worker_path(connection_id, &digest)),
     };
 
-    if placement != SqliteWorkerPlacement::Preplaced {
-        ensure_worker_consent(data_dir, &identity, &remote_path, &digest).await?;
-        upload_worker(&session, &remote_path, &local_worker.bytes).await?;
-    }
-
+    let expanded_db = expand_home(db_path);
     let session = Arc::new(session);
     let start_worker = async {
+        ensure_remote_sqlite_file_exists(session.as_ref(), &expanded_db).await?;
+        if placement != SqliteWorkerPlacement::Preplaced {
+            ensure_worker_consent(data_dir, &identity, &remote_path, &digest).await?;
+            upload_worker(session.as_ref(), &remote_path, &local_worker.bytes).await?;
+        }
         verify_remote_digest(session.as_ref(), &remote_path, &digest).await?;
         let channel = session.channel_open_session().await.map_err(|e| format!("SSH session channel failed: {e}"))?;
         channel
@@ -370,7 +371,7 @@ pub async fn connect_sqlite_worker(
             ssh_session: Some(Arc::clone(&session)),
             remove_remote_path: remove_remote_on_close.then(|| remote_path.clone()),
         };
-        client.open_database(&expand_home(db_path)).await?;
+        client.open_database(&expanded_db).await?;
         Ok(client)
     };
     match start_worker.await {
@@ -520,6 +521,23 @@ async fn open_final_hop_session(
 
 async fn remote_linux_platform(session: &Handle<SshClient>) -> Result<String, String> {
     linux_platform_from_uname(ssh_capture(session, "uname -m").await?.trim())
+}
+
+async fn ensure_remote_sqlite_file_exists(session: &Handle<SshClient>, path: &str) -> Result<(), String> {
+    let output = ssh_capture(session, &remote_sqlite_exists_command(path)).await?;
+    remote_sqlite_exists_from_output(path, &output)
+}
+
+fn remote_sqlite_exists_command(path: &str) -> String {
+    format!("test -f {} && echo ok", shell_quote(path))
+}
+
+fn remote_sqlite_exists_from_output(path: &str, output: &str) -> Result<(), String> {
+    if output.trim() == "ok" {
+        Ok(())
+    } else {
+        Err(format!("File does not exist: {path}"))
+    }
 }
 
 fn linux_platform_from_uname(machine: &str) -> Result<String, String> {
@@ -755,6 +773,14 @@ mod tests {
         assert!(remote_exec_status(Some(0)).is_ok());
         assert!(remote_exec_status(Some(1)).unwrap_err().contains("status 1"));
         assert!(remote_exec_status(None).unwrap_err().contains("without an exit status"));
+    }
+
+    #[test]
+    fn remote_sqlite_exists_requires_a_regular_file() {
+        assert_eq!(remote_sqlite_exists_command("/remote/data/app.db"), "test -f '/remote/data/app.db' && echo ok");
+        assert!(remote_sqlite_exists_from_output("/remote/data/app.db", "ok\n").is_ok());
+        let error = remote_sqlite_exists_from_output("/remote/data/app.db", "").unwrap_err();
+        assert!(error.contains("File does not exist"), "{error}");
     }
 
     #[test]

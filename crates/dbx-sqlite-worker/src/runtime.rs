@@ -65,7 +65,10 @@ fn open_database(path: &str) -> Result<Connection, String> {
     if path.contains('\0') {
         return Err("SQLite path contains NUL".to_string());
     }
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_URI;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI;
+    if !Path::new(path).is_file() {
+        return Err(format!("File does not exist: {path}"));
+    }
     let conn = Connection::open_with_flags(path, flags).map_err(|e| format!("failed to open SQLite file: {e}"))?;
     conn.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
     Ok(conn)
@@ -163,6 +166,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dbx-sqlite-worker-{}", uuid_like()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("app.db");
+        rusqlite::Connection::open(&db).unwrap();
         let backup = dir.join("app.bak");
         let mut connection = None;
         let open =
@@ -192,6 +196,21 @@ mod tests {
         );
         assert!(matches!(backup_resp.body, WorkerBody::Ok { .. }), "{backup_resp:?}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn open_rejects_missing_files_instead_of_creating_them() {
+        let path = std::env::temp_dir().join(format!("dbx-sqlite-worker-missing-{}.db", uuid_like()));
+        let mut connection = None;
+        let open = handle(
+            &mut connection,
+            WorkerRequest { id: 1, op: WorkerOp::Open { path: path.to_string_lossy().into() } },
+        );
+        match open.body {
+            WorkerBody::Err { error } => assert!(error.contains("File does not exist"), "{error}"),
+            other => panic!("expected missing-file error, got {other:?}"),
+        }
+        assert!(!path.exists());
     }
 
     fn uuid_like() -> String {
