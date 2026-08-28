@@ -1471,6 +1471,7 @@ export default withEnglishFallback({
     totalRows: "共 {count} 筆",
     loadedRows: "已載入 {count} 筆",
     totalRowCount: "（總計 {count} 筆）",
+    totalRowCountWithAction: "（{button}總計 {count} 筆）",
     totalRowCountAtLeast: "（至少 {count} 筆）",
     totalRowCountEstimated: "（約 {count} 筆）",
     totalRowCountLoading: "（統計中...）",

@@ -1492,6 +1492,7 @@ export default withEnglishFallback({
     totalRows: "{count}件表示",
     loadedRows: "{count}件読み込み済み",
     totalRowCount: "（全{count}件）",
+    totalRowCountWithAction: "（{button}全{count}件）",
     totalRowCountAtLeast: "（少なくとも{count}件）",
     totalRowCountEstimated: "（約 {count}件）",
     totalRowCountLoading: "（カウント中...）",

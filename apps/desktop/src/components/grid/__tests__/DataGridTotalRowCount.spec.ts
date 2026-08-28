@@ -61,6 +61,7 @@ describe("DataGrid rerun total row count action", () => {
   });
 
   it("renders a spaced rerun icon labelled for the total-count action and disabled while counting", () => {
+    expect(statusRenderSource).toContain('keypath: "grid.totalRowCountWithAction"');
     expect(rerunBranch).toContain('<button type="button" class="mr-1 inline-flex h-3.5 w-3.5');
     expect(rerunBranch).toContain("disabled:pointer-events-none");
     expect(rerunBranch).toContain("disabled:opacity-50");

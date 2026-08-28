@@ -1412,6 +1412,7 @@ export default withEnglishFallback({
     totalRows: "전체 {count}행",
     loadedRows: "{count}행 로드됨",
     totalRowCount: "(전체 {count})",
+    totalRowCountWithAction: "({button}전체 {count})",
     totalRowCountAtLeast: "(최소 {count})",
     totalRowCountEstimated: "(약 {count})",
     totalRowCountLoading: "(집계 중...)",

@@ -1472,6 +1472,7 @@ export default withEnglishFallback({
     totalRows: "Total de {count} linhas",
     loadedRows: "{count} linhas carregadas",
     totalRowCount: "({count} no total)",
+    totalRowCountWithAction: "({button}{count} no total)",
     totalRowCountAtLeast: "(pelo menos {count} no total)",
     totalRowCountEstimated: "(aprox. {count})",
     totalRowCountLoading: "(contando...)",

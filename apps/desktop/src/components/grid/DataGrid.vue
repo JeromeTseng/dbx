@@ -14086,20 +14086,23 @@ function openGridSnapshot() {
               count: result.rows.length,
             })
           }}
-          <button
-            v-if="showRerunTotalCountAction && !(totalRowCountBusy && !manualTotalRowCountLoading)"
-            type="button"
-            class="mr-1 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm align-middle text-muted-foreground/70 hover:bg-gray-200 hover:text-foreground disabled:pointer-events-none disabled:opacity-50 dark:hover:bg-gray-800"
-            :disabled="manualTotalRowCountLoading"
-            :aria-busy="manualTotalRowCountLoading ? 'true' : undefined"
-            :title="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
-            :aria-label="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
-            @click="calculateTotalRowCount"
-          >
-            <Loader2 v-if="manualTotalRowCountLoading" aria-hidden="true" class="h-3 w-3 animate-spin" />
-            <RefreshCcw v-else aria-hidden="true" class="h-3 w-3" />
-          </button>
-          <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountLabelKey, { count: displayedTotalRowCount }) }}</span>
+          <i18n-t v-if="showRerunTotalCountAction && !(totalRowCountBusy && !manualTotalRowCountLoading)" keypath="grid.totalRowCountWithAction" tag="span" class="text-muted-foreground/70" :values="{ count: displayedTotalRowCount }">
+            <template #button>
+              <button
+                type="button"
+                class="mr-1 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm align-middle text-muted-foreground/70 hover:bg-gray-200 hover:text-foreground disabled:pointer-events-none disabled:opacity-50 dark:hover:bg-gray-800"
+                :disabled="manualTotalRowCountLoading"
+                :aria-busy="manualTotalRowCountLoading ? 'true' : undefined"
+                :title="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
+                :aria-label="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
+                @click="calculateTotalRowCount"
+              >
+                <Loader2 v-if="manualTotalRowCountLoading" aria-hidden="true" class="h-3 w-3 animate-spin" />
+                <RefreshCcw v-else aria-hidden="true" class="h-3 w-3" />
+              </button>
+            </template>
+          </i18n-t>
+          <span v-else-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountLabelKey, { count: displayedTotalRowCount }) }}</span>
           <span v-if="totalRowCountBusy && !(showRerunTotalCountAction && manualTotalRowCountLoading)" class="text-muted-foreground/70">
             {{ t("grid.totalRowCountLoading") }}
           </span>
