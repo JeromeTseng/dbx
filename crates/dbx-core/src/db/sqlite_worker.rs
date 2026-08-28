@@ -276,6 +276,7 @@ pub async fn connect_sqlite_worker(
     data_dir: &Path,
     connection_id: &str,
     config: &ConnectionConfig,
+    transport_layers: &[TransportLayerConfig],
 ) -> Result<Arc<SqliteWorkerClient>, String> {
     if !sqlite_ssh_runtime_enabled() {
         return Err("Remote SQLite over SSH is only available in the DBX Desktop app".to_string());
@@ -290,7 +291,7 @@ pub async fn connect_sqlite_worker(
         return Err("Remote SQLite over SSH does not support attached databases in v1".to_string());
     }
 
-    let hops = ssh_hops(config)?;
+    let hops = ssh_hops(transport_layers)?;
     let db_path = config.host.trim();
     if db_path.is_empty() {
         return Err("Remote SQLite path is empty".to_string());
@@ -626,12 +627,17 @@ async fn verify_remote_digest(session: &Handle<SshClient>, path: &str, digest: &
     Ok(())
 }
 
-fn ssh_hops(config: &ConnectionConfig) -> Result<Vec<SshTunnelConfig>, String> {
-    let hops = config
-        .effective_transport_layers()
-        .into_iter()
+fn ssh_hops(layers: &[TransportLayerConfig]) -> Result<Vec<SshTunnelConfig>, String> {
+    let hops = layers
+        .iter()
         .map(|layer| match layer {
-            TransportLayerConfig::Ssh(ssh) => Ok(ssh),
+            TransportLayerConfig::Ssh(ssh) => {
+                let ssh = crate::ssh_config::resolve_ssh_tunnel_config(ssh);
+                if ssh.host.trim().is_empty() {
+                    return Err("SSH host is required.".to_string());
+                }
+                Ok(ssh)
+            }
             _ => Err("Remote SQLite over SSH does not support proxy or HTTP tunnel layers".to_string()),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -709,6 +715,46 @@ mod tests {
     fn remote_sqlite_requires_ssh() {
         let config = empty_config();
         assert!(!sqlite_ssh_worker_requested(&config));
+    }
+
+    #[test]
+    fn ssh_hops_uses_resolved_layers_instead_of_profile_stubs() {
+        let hops = ssh_hops(&[ssh_layer("203.0.113.10", "testuser")]).unwrap();
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].host, "203.0.113.10");
+        assert_eq!(hops[0].user, "testuser");
+    }
+
+    #[test]
+    fn ssh_hops_rejects_unresolved_profile_stubs() {
+        let error = ssh_hops(&[ssh_layer("", "")]).unwrap_err();
+        assert!(error.contains("SSH host is required"), "{error}");
+    }
+
+    #[test]
+    fn ssh_hops_rejects_non_ssh_layers() {
+        let layer = serde_json::from_value(serde_json::json!({
+            "type": "proxy",
+            "id": "proxy-1",
+            "enabled": true,
+            "host": "203.0.113.10",
+            "port": 1080
+        }))
+        .unwrap();
+        let error = ssh_hops(&[layer]).unwrap_err();
+        assert!(error.contains("proxy or HTTP"), "{error}");
+    }
+
+    fn ssh_layer(host: &str, user: &str) -> TransportLayerConfig {
+        serde_json::from_value(serde_json::json!({
+            "type": "ssh",
+            "id": "hop-1",
+            "enabled": true,
+            "host": host,
+            "port": 22,
+            "user": user
+        }))
+        .unwrap()
     }
 
     fn empty_config() -> ConnectionConfig {

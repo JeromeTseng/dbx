@@ -2129,12 +2129,14 @@ impl AppState {
             }
             DatabaseType::Sqlite => {
                 if db::sqlite_worker::sqlite_ssh_worker_requested(&db_config) {
+                    let transport_layers = self.resolved_transport_layers(&db_config).await?;
                     let worker = db::sqlite_worker::connect_sqlite_worker(
                         &self.tunnels,
                         &self.agent_manager,
                         self.storage.data_dir(),
                         connection_id,
                         &db_config,
+                        &transport_layers,
                     )
                     .await?;
                     PoolKind::Sqlite(db::sqlite::SqliteHandle::from_worker(worker))
