@@ -170,8 +170,8 @@ fn append_startup_probe(message: impl AsRef<str>) {
     startup_recovery::record(message);
 }
 
-pub(crate) fn clear_startup_probe_after_frontend_ready() {
-    startup_recovery::mark_frontend_ready();
+pub(crate) fn clear_startup_probe_after_frontend_ready(main_window_visible: bool) {
+    startup_recovery::mark_frontend_ready(main_window_visible);
 }
 
 fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
