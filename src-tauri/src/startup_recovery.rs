@@ -444,9 +444,6 @@ pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             show_recovery_failure_message();
             std::process::exit(1);
         }
-        if run_event_count > 0 && !main_exists {
-            return;
-        }
     });
 }
 
