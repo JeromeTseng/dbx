@@ -9,6 +9,61 @@ import java.sql.SQLException;
 
 class SqlServerLegacyAgentTest {
     @Test
+    void onlySqlServer8UnsupportedErrorsTriggerTheOldDriverFallback() {
+        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("该驱动程序不支持 SQL Server 8 版")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("The driver does not support SQL Server 8")
+        ));
+        Assertions.assertFalse(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("TLS handshake failed")
+        ));
+        Assertions.assertFalse(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("Login failed for user 'sa'")
+        ));
+    }
+
+    @Test
+    void jtdsUrlUsesLegacySqlServerSyntax() {
+        ConnectParams params = new ConnectParams(
+            "db.example.com",
+            1433,
+            "appdb",
+            "sa",
+            "secret",
+            "applicationName=dbx;encrypt=true;sslProtocol=TLSv1",
+            "",
+            false
+        );
+
+        Assertions.assertEquals(
+            "jdbc:jtds:sqlserver://db.example.com:1433/appdb;appName=dbx",
+            SqlServerLegacyAgent.jtdsUrl(params)
+        );
+    }
+
+    @Test
+    void jtdsUrlPreservesExplicitPortForNamedInstance() {
+        ConnectParams params = new ConnectParams(
+            "db.example.com\\MSSQLSERVER",
+            11433,
+            "appdb",
+            "sa",
+            "secret",
+            "",
+            "",
+            false
+        );
+        params.setPort_explicit(true);
+
+        Assertions.assertEquals(
+            "jdbc:jtds:sqlserver://db.example.com:11433/appdb",
+            SqlServerLegacyAgent.jtdsUrl(params)
+        );
+    }
+
+    @Test
     void metadataSchemaKeepsExplicitSchemaAndResolvesDefault() {
         Assertions.assertEquals("sales", SqlServerLegacyAgent.normalizeMetadataSchema("sales", "dbo"));
         Assertions.assertEquals("tenant_owner", SqlServerLegacyAgent.normalizeMetadataSchema("", "tenant_owner"));
@@ -16,6 +71,12 @@ class SqlServerLegacyAgentTest {
         Assertions.assertEquals(
             "SELECT COALESCE(OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(?))), NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name",
             SqlServerLegacyAgent.unqualifiedObjectSchemaSql()
+        );
+        Assertions.assertEquals(
+            "SELECT TOP 1 u.name AS schema_name FROM sysobjects o JOIN sysusers u ON o.uid = u.uid "
+                + "WHERE o.name = ? AND o.xtype IN ('U', 'V') "
+                + "ORDER BY CASE WHEN u.name = 'dbo' THEN 0 ELSE 1 END, u.name",
+            SqlServerLegacyAgent.sqlServer2000ObjectSchemaSql()
         );
     }
 

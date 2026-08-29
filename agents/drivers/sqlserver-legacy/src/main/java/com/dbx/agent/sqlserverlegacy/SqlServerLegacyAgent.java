@@ -27,6 +27,9 @@ import java.util.Objects;
 import java.util.Set;
 
 public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
+    private static final String JTDS_DRIVER_CLASS = "net.sourceforge.jtds.jdbc.Driver";
+    private static final String SQLSERVER_JDBC_PREFIX = "jdbc:sqlserver://";
+    private static final String JTDS_JDBC_PREFIX = "jdbc:jtds:sqlserver://";
     private static final String TLS_DISABLED_ALGORITHMS_KEY = "jdk.tls.disabledAlgorithms";
     private static final Set<String> LEGACY_TLS_ALGORITHMS_TO_ALLOW = Set.of(
         "TLSV1",
@@ -57,6 +60,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         Set.of("INFORMATION_SCHEMA", "SYS"),
         Arrays.asList("TABLE", "VIEW", "SYSTEM TABLE")
     );
+    private volatile boolean sqlServer2000Mode;
 
     public SqlServerLegacyAgent() {
         super(PROFILE);
@@ -72,15 +76,153 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     protected Connection openConnection(ConnectParams params) throws Exception {
+        sqlServer2000Mode = false;
         try {
-            return super.openConnection(params);
+            Connection connection = super.openConnection(params);
+            sqlServer2000Mode = false;
+            return connection;
         } catch (SQLException error) {
+            if (isSqlServer2000Unsupported(error)) {
+                try {
+                    Class.forName(JTDS_DRIVER_CLASS);
+                    Connection connection = DriverManager.getConnection(
+                        jtdsUrl(params),
+                        params.getUsername(),
+                        params.getPassword()
+                    );
+                    sqlServer2000Mode = true;
+                    return connection;
+                } catch (SQLException fallbackError) {
+                    fallbackError.addSuppressed(error);
+                    throw withLegacyTlsDiagnostics(fallbackError, "jTDS 1.3.1");
+                } catch (ClassNotFoundException fallbackError) {
+                    SQLException wrapped = new SQLException(
+                        "SQL Server 2000 fallback driver is not available",
+                        error.getSQLState(),
+                        error.getErrorCode(),
+                        fallbackError
+                    );
+                    wrapped.addSuppressed(error);
+                    throw withLegacyTlsDiagnostics(wrapped, "jTDS unavailable");
+                }
+            }
             throw withLegacyTlsDiagnostics(error);
         }
     }
 
     @Override
+    public void disconnect() {
+        try {
+            super.disconnect();
+        } finally {
+            sqlServer2000Mode = false;
+        }
+    }
+
+    static boolean isSqlServer2000Unsupported(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("sql server 8")
+                    && (normalized.contains("does not support")
+                        || normalized.contains("not support")
+                        || normalized.contains("不支持"))) {
+                    return true;
+                }
+            }
+            if (current instanceof SQLException) {
+                SQLException next = ((SQLException) current).getNextException();
+                if (next != null && next != current.getCause()) {
+                    if (isSqlServer2000Unsupported(next)) {
+                        return true;
+                    }
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    static String jtdsUrl(ConnectParams params) {
+        String explicit = params.getConnection_string() == null ? "" : params.getConnection_string().trim();
+        if (explicit.toLowerCase(Locale.ROOT).startsWith(JTDS_JDBC_PREFIX)) {
+            return appendProperties(trimSqlServerUrl(explicit), jtdsConnectionProperties(params));
+        }
+
+        String sqlServerUrl = baseJdbcUrl(params);
+        String body = sqlServerUrl.substring(SQLSERVER_JDBC_PREFIX.length());
+        String[] parts = body.split(";", -1);
+        String authority = parts[0].trim();
+        String database = "";
+        for (int i = 1; i < parts.length; i++) {
+            int separator = parts[i].indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String key = parts[i].substring(0, separator).trim();
+            if ("databaseName".equalsIgnoreCase(key)) {
+                database = parts[i].substring(separator + 1).trim();
+                break;
+            }
+        }
+
+        StringBuilder url = new StringBuilder(JTDS_JDBC_PREFIX);
+        String namedInstance = namedInstance(authority);
+        if (namedInstance != null && !params.isPort_explicit()) {
+            url.append(namedInstance.substring(0, namedInstance.indexOf('\\')));
+        } else {
+            url.append(authority);
+        }
+        if (database.length() > 0) {
+            url.append('/').append(database);
+        }
+        if (namedInstance != null && !params.isPort_explicit()) {
+            url.append(";instance=")
+                .append(namedInstance.substring(namedInstance.indexOf('\\') + 1));
+        }
+        return appendProperties(url.toString(), jtdsConnectionProperties(params));
+    }
+
+    private static String namedInstance(String authority) {
+        int separator = authority.indexOf('\\');
+        if (separator <= 0 || separator >= authority.length() - 1) {
+            return null;
+        }
+        return authority;
+    }
+
+    private static Map<String, String> jtdsConnectionProperties(ConnectParams params) {
+        Map<String, String> properties = new LinkedHashMap<>();
+        String urlParams = params.getUrl_params();
+        if (urlParams == null || urlParams.trim().isEmpty()) {
+            return properties;
+        }
+        for (String pair : urlParams.trim().split("[&;]")) {
+            String value = pair.trim();
+            int separator = value.indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String key = value.substring(0, separator).trim();
+            String property = value.substring(separator + 1).trim();
+            if ("applicationName".equalsIgnoreCase(key)) {
+                properties.put("appName", property);
+            } else if ("ssl".equalsIgnoreCase(key)
+                || "socketTimeout".equalsIgnoreCase(key)
+                || "loginTimeout".equalsIgnoreCase(key)) {
+                properties.put(key, property);
+            }
+        }
+        return properties;
+    }
+
+    @Override
     public String getTableComment(String schema, String table) {
+        if (sqlServer2000Mode) {
+            return null;
+        }
         return unchecked(() -> {
             try (PreparedStatement statement = requireConnection().prepareStatement(tableCommentSql())) {
                 statement.setString(1, schema);
@@ -116,7 +258,8 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             return schema;
         }
         return unchecked(() -> {
-            try (PreparedStatement statement = requireConnection().prepareStatement(unqualifiedObjectSchemaSql())) {
+            String schemaSql = sqlServer2000Mode ? sqlServer2000ObjectSchemaSql() : unqualifiedObjectSchemaSql();
+            try (PreparedStatement statement = requireConnection().prepareStatement(schemaSql)) {
                 statement.setString(1, table);
                 try (ResultSet resultSet = statement.executeQuery()) {
                     return normalizeMetadataSchema(schema, resultSet.next() ? resultSet.getString("schema_name") : null);
@@ -128,6 +271,13 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     static String unqualifiedObjectSchemaSql() {
         return "SELECT COALESCE(OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(?))), "
             + "NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name";
+    }
+
+    static String sqlServer2000ObjectSchemaSql() {
+        return "SELECT TOP 1 u.name AS schema_name FROM sysobjects o "
+            + "JOIN sysusers u ON o.uid = u.uid "
+            + "WHERE o.name = ? AND o.xtype IN ('U', 'V') "
+            + "ORDER BY CASE WHEN u.name = 'dbo' THEN 0 ELSE 1 END, u.name";
     }
 
     static String normalizeMetadataSchema(String schema, String defaultSchema) {
@@ -224,10 +374,14 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static String legacyTlsDiagnostics() {
+        return legacyTlsDiagnostics(jdbcDriverVersion());
+    }
+
+    private static String legacyTlsDiagnostics(String jdbcVersion) {
         String disabledAlgorithms = Security.getProperty(TLS_DISABLED_ALGORITHMS_KEY);
         return "DBX SQL Server legacy TLS diagnostics: java=" + System.getProperty("java.version", "unknown")
             + ", javaVendor=" + System.getProperty("java.vendor", "unknown")
-            + ", jdbc=" + jdbcDriverVersion()
+            + ", jdbc=" + jdbcVersion
             + ", sslProtocol=TLSv1"
             + ", tlsV1Disabled=" + isDisabled(disabledAlgorithms, "TLSV1")
             + ", tlsRsaDisabled=" + isDisabled(disabledAlgorithms, "TLS_RSA_*")
@@ -238,9 +392,13 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static SQLException withLegacyTlsDiagnostics(SQLException error) {
+        return withLegacyTlsDiagnostics(error, jdbcDriverVersion());
+    }
+
+    static SQLException withLegacyTlsDiagnostics(SQLException error, String jdbcVersion) {
         String message = error.getMessage() == null ? error.toString() : error.getMessage();
         return new SQLException(
-            message + "\n\n" + legacyTlsDiagnostics(),
+            message + "\n\n" + legacyTlsDiagnostics(jdbcVersion),
             error.getSQLState(),
             error.getErrorCode(),
             error
