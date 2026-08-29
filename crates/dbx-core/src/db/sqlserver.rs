@@ -1079,7 +1079,7 @@ fn build_sqlserver_unsafe_type_query(
         .map(|(column_index, _)| SqlServerRestoredColumn { column_index, column_type: "hierarchyid".to_string() })
         .collect();
     let inner_closing_line_break =
-        statement.inner.lines().last().is_some_and(|line| line.contains("--")).then_some("\n").unwrap_or("");
+        if statement.inner.lines().last().is_some_and(|line| line.contains("--")) { "\n" } else { "" };
 
     // Re-apply the original ORDER BY / OFFSET / FETCH on the outer query so
     // ordering and pagination survive the derived-table rewrite. When the sort
