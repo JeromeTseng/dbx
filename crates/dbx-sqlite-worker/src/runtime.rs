@@ -157,33 +157,36 @@ fn query_statement(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody 
             let mut truncated = false;
             let mut encoded_bytes = 0usize;
             match stmt.query([]) {
-                Ok(mut mapped) => {
-                    while let Ok(Some(row)) = mapped.next() {
-                        if rows.len() >= max_rows {
-                            truncated = true;
-                            break;
-                        }
-                        let mut values = Vec::with_capacity(columns.len());
-                        for index in 0..columns.len() {
-                            match row.get_ref(index) {
-                                Ok(value) => {
-                                    let (json, blob_truncated) =
-                                        value_to_json(value, column_decl_types.get(index).and_then(Option::as_deref));
-                                    truncated |= blob_truncated;
-                                    values.push(json);
-                                }
-                                Err(error) => return WorkerBody::err(error.to_string()),
-                            }
-                        }
-                        let row_size = serde_json::to_vec(&values).map(|encoded| encoded.len()).unwrap_or(0);
-                        if !rows.is_empty() && encoded_bytes + row_size > MAX_RESPONSE_JSON_BYTES {
-                            truncated = true;
-                            break;
-                        }
-                        encoded_bytes += row_size;
-                        rows.push(values);
+                Ok(mut mapped) => loop {
+                    let row = match mapped.next() {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
+                        Err(error) => return WorkerBody::err(error.to_string()),
+                    };
+                    if rows.len() >= max_rows {
+                        truncated = true;
+                        break;
                     }
-                }
+                    let mut values = Vec::with_capacity(columns.len());
+                    for index in 0..columns.len() {
+                        match row.get_ref(index) {
+                            Ok(value) => {
+                                let (json, blob_truncated) =
+                                    value_to_json(value, column_decl_types.get(index).and_then(Option::as_deref));
+                                truncated |= blob_truncated;
+                                values.push(json);
+                            }
+                            Err(error) => return WorkerBody::err(error.to_string()),
+                        }
+                    }
+                    let row_size = serde_json::to_vec(&values).map(|encoded| encoded.len()).unwrap_or(0);
+                    if !rows.is_empty() && encoded_bytes + row_size > MAX_RESPONSE_JSON_BYTES {
+                        truncated = true;
+                        break;
+                    }
+                    encoded_bytes += row_size;
+                    rows.push(values);
+                },
                 Err(error) => return WorkerBody::err(error.to_string()),
             }
             WorkerBody::query(columns, column_types, rows, 0, truncated)
@@ -412,6 +415,21 @@ mod tests {
             WorkerBody::Err { error } => panic!("{error}"),
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn query_iteration_errors_are_not_reported_as_partial_success() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (value TEXT);
+             INSERT INTO t VALUES ('{\"id\":1}'), ('not-json');",
+        )
+        .unwrap();
+
+        match query(&conn, "SELECT json_extract(value, '$.id') FROM t ORDER BY rowid", 10) {
+            WorkerBody::Err { error } => assert!(error.contains("malformed JSON"), "{error}"),
+            response => panic!("expected query error, got {response:?}"),
+        }
     }
 
     #[test]

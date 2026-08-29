@@ -146,7 +146,9 @@ impl SqliteWorkerClient {
             ssh_download_file(session.as_ref(), &remote, dest).await
         }
         .await;
-        let _ = ssh_remove_file(session.as_ref(), &remote).await;
+        if transfer.is_ok() {
+            let _ = ssh_remove_file(session.as_ref(), &remote).await;
+        }
         transfer
     }
 
@@ -585,18 +587,25 @@ async fn ssh_download_file(session: &Handle<SshClient>, remote: &str, dest: &Pat
             tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
         }
     }
-    let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
+    let mut channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
     channel.exec(true, format!("cat {}", shell_quote(remote))).await.map_err(|e| e.to_string())?;
-    let mut stream = channel.into_stream();
     let mut file =
         tokio::fs::File::create(dest).await.map_err(|e| format!("failed to create local backup file: {e}"))?;
-    let copied =
-        tokio::io::copy(&mut stream, &mut file).await.map_err(|e| format!("failed to download SQLite backup: {e}"))?;
+    let copied = {
+        let mut stream = channel.make_reader();
+        tokio::io::copy(&mut stream, &mut file).await.map_err(|e| format!("failed to download SQLite backup: {e}"))?
+    };
     file.flush().await.map_err(|e| e.to_string())?;
-    if copied == 0 {
-        return Err("Downloaded SQLite backup was empty".to_string());
+    let mut exit_status = None;
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::ExitStatus { exit_status: status }) => exit_status = Some(status),
+            Some(ChannelMsg::Close) | None => break,
+            Some(ChannelMsg::Eof | ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. }) => {}
+            Some(_) => {}
+        }
     }
-    Ok(())
+    validate_remote_download(copied, exit_status)
 }
 
 async fn ssh_upload_file(session: &Handle<SshClient>, src: &Path, remote: &str) -> Result<(), String> {
@@ -678,6 +687,13 @@ fn remote_exec_status(exit_status: Option<u32>) -> Result<(), String> {
         Some(code) => Err(format!("remote command exited with status {code}")),
         None => Err("remote command closed without an exit status".to_string()),
     }
+}
+
+fn validate_remote_download(copied: u64, exit_status: Option<u32>) -> Result<(), String> {
+    if copied == 0 {
+        return Err("Downloaded SQLite backup was empty".to_string());
+    }
+    remote_exec_status(exit_status)
 }
 
 async fn verify_remote_digest(session: &Handle<SshClient>, path: &str, digest: &str) -> Result<(), String> {
@@ -780,10 +796,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_exec_status_waits_for_a_successful_exit() {
-        assert!(remote_exec_status(Some(0)).is_ok());
-        assert!(remote_exec_status(Some(1)).unwrap_err().contains("status 1"));
-        assert!(remote_exec_status(None).unwrap_err().contains("without an exit status"));
+    fn remote_download_requires_a_successful_non_empty_transfer() {
+        assert!(validate_remote_download(1, Some(0)).is_ok());
+        assert!(validate_remote_download(1, Some(1)).unwrap_err().contains("status 1"));
+        assert!(validate_remote_download(1, None).unwrap_err().contains("without an exit status"));
+        assert!(validate_remote_download(0, Some(0)).unwrap_err().contains("was empty"));
     }
 
     #[test]
