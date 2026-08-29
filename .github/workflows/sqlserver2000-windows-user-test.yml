@@ -48,7 +48,8 @@ jobs:
           cache-on-failure: true
 
       - name: Build SQL Server legacy agent
-        run: .\\agents\\gradlew.bat :sqlserver-legacy:shadowJar --no-daemon
+        run: .\\gradlew.bat :sqlserver-legacy:shadowJar --no-daemon
+        working-directory: agents
 
       - name: Stage SQL Server legacy agent
         shell: pwsh
