@@ -42,8 +42,14 @@ describe("ObjectBrowser MySQL Event CREATE navigation", () => {
     expect(openInitialEventIfNeeded).not.toContain("sidePanelRow.value = row;");
   });
 
-  it("renders the editor with sidePanelRow name (empty in create mode -> CREATE SQL)", () => {
-    expect(objectBrowserSource).toContain('<MySqlEventEditor :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name"');
+  it("keeps the CREATE editor mounted when there is no EVENT row", () => {
+    expect(objectBrowserSource).toContain('v-if="sidePanelRow || isEventEditor"');
+    expect(objectBrowserSource).toContain('<MySqlEventEditor :key="eventEditorKey"');
+  });
+
+  it("renders the editor with an empty CREATE name and request-scoped instance", () => {
+    expect(objectBrowserSource).toContain('<MySqlEventEditor :key="eventEditorKey" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name"');
+    expect(objectBrowserSource).toMatch(/const eventEditorKey = computed\(\(\) =>[\s\S]*?createRequestId: props\.initialEventCreateRequestId[\s\S]*?openRequestId: props\.initialEventOpenRequestId[\s\S]*?rowId: sidePanelRow\.value\?\.id/);
   });
 
   it("re-triggers a create request when the request id changes on a reused tab", () => {
