@@ -335,7 +335,10 @@ mod tests {
         assert!(matches!(script.body, WorkerBody::Ok { .. }), "{script:?}");
         let select = handle(
             &mut connection,
-            WorkerRequest { id: 3, op: WorkerOp::Query { sql: "SELECT id FROM t ORDER BY id".into(), max_rows: Some(10) } },
+            WorkerRequest {
+                id: 3,
+                op: WorkerOp::Query { sql: "SELECT id FROM t ORDER BY id".into(), max_rows: Some(10) },
+            },
         );
         match select.body {
             WorkerBody::Ok { rows, .. } => {

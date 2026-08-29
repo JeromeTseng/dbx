@@ -217,7 +217,7 @@ impl SqliteWorkerClient {
                 stdout.read_line(&mut line).await.map_err(|e| e.to_string())?;
                 parse_response(id, &line)
             }
-            WorkerIo::Closed => return Err("SQLite worker session is closed".to_string()),
+            WorkerIo::Closed => Err("SQLite worker session is closed".to_string()),
             WorkerIo::Ssh { stream, .. } => {
                 stream.write_all(&encoded).await.map_err(|e| e.to_string())?;
                 stream.flush().await.map_err(|e| e.to_string())?;

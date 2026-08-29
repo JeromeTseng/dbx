@@ -53,7 +53,14 @@ impl WorkerBody {
     }
 
     pub fn pong() -> Self {
-        Self::Ok { columns: None, column_types: None, rows: None, affected_rows: None, truncated: None, pong: Some(true) }
+        Self::Ok {
+            columns: None,
+            column_types: None,
+            rows: None,
+            affected_rows: None,
+            truncated: None,
+            pong: Some(true),
+        }
     }
 
     pub fn query(
