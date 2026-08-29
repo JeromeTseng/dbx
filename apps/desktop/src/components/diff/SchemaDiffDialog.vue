@@ -51,6 +51,7 @@ import {
   type CompatibilityWarning,
   type PermissionDiff,
   type DependencyGraph,
+  normalizeSchemaDiffDependencyGraph,
 } from "@/lib/schema/schemaDiff";
 import { compileSchemaDiffTableFilter, filterSchemaDiffTables, isSchemaDiffView } from "@/lib/schema/schemaDiffTableFilter";
 import { Splitpanes, Pane } from "splitpanes";
@@ -553,7 +554,7 @@ async function handleCompare() {
     renameCandidates.value = result.renameCandidates ?? [];
     compatibilityWarnings.value = result.compatibilityWarnings ?? [];
     permissionDiffs.value = result.permissionDiffs ?? [];
-    dependencyGraph.value = result.dependencyGraph ?? null;
+    dependencyGraph.value = normalizeSchemaDiffDependencyGraph(result.dependencyGraph);
 
     // Convert to unified objects
     diffObjects.value = convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs, result.renameCandidates);
@@ -640,13 +641,19 @@ function formatSchemaSyncPlan(plan: Awaited<ReturnType<typeof api.generateSchema
   return { forwardSql, rollbackSql: nextRollbackSql };
 }
 
+function clearSelectedDeploySql() {
+  selectedForwardDeploySql.value = "";
+  selectedDeploySql.value = "";
+  rollbackSql.value = "";
+  rollbackCompleteness.value = "complete";
+  missingRollbackObjects.value = [];
+}
+
 async function regenerateSelectedDeploySql() {
   const result = lastDiffResult.value;
   const generation = ++selectedDeploySqlGeneration;
+  clearSelectedDeploySql();
   if (!result) {
-    selectedForwardDeploySql.value = "-- No objects selected";
-    selectedDeploySql.value = "-- No objects selected";
-    rollbackSql.value = "";
     return;
   }
 
@@ -672,10 +679,10 @@ async function regenerateSelectedDeploySql() {
 async function regenerateFocusedDeploySql(objectId: string | null = selectedObjectId.value) {
   const result = lastDiffResult.value;
   const generation = ++focusedDeploySqlGeneration;
+  focusedForwardDeploySql.value = "";
+  focusedRollbackSql.value = "";
+  focusedDeploySql.value = "";
   if (!result || !objectId || !findSchemaDiffObject(diffObjects.value, objectId)) {
-    focusedForwardDeploySql.value = "-- No objects selected";
-    focusedRollbackSql.value = "";
-    focusedDeploySql.value = "-- No objects selected";
     return;
   }
 
@@ -713,7 +720,8 @@ const canExecuteDeploy = computed(() => {
   if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
     return false;
   }
-  return true;
+  const sql = selectedDeploySql.value.trim();
+  return sql.length > 0 && sql !== "-- No objects selected";
 });
 
 const destructiveStatements = computed(() => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { convertToSchemaDiffObjects, selectSchemaDiffInput, selectSchemaDiffInputForObject, setSchemaDiffObjectSelected, type SchemaDiffPreparation } from "../../schema/schemaDiff";
+import { convertToSchemaDiffObjects, normalizeSchemaDiffDependencyGraph, selectSchemaDiffInput, selectSchemaDiffInputForObject, setSchemaDiffObjectSelected, type SchemaDiffPreparation } from "../../schema/schemaDiff";
 
 function createPreparation(): SchemaDiffPreparation {
   return {
@@ -72,6 +72,39 @@ describe("schema diff SQL selection projections", () => {
       sequenceDiffs: [],
       ruleDiffs: [],
       ownerDiffs: [],
+    });
+  });
+
+  it("includes the complete predecessor closure in focused table SQL", () => {
+    const result = createPreparation();
+    result.diffs.push({
+      type: "added",
+      objectType: "table",
+      name: "table_c",
+    });
+    result.dependencyGraph = {
+      nodes: [
+        { tableName: "table_a", dependsOn: ["table_b"], dependedBy: [] },
+        { tableName: "table_b", dependsOn: ["table_c"], dependedBy: ["table_a"] },
+        { tableName: "table_c", dependsOn: [], dependedBy: ["table_b"] },
+      ],
+    };
+    const objects = convertToSchemaDiffObjects(result.diffs);
+
+    const focusedInput = selectSchemaDiffInputForObject(result, objects, "table-table_a");
+
+    expect(focusedInput.diffs.map((diff) => diff.name)).toEqual(["table_a", "table_b", "table_c"]);
+  });
+
+  it("normalizes the Rust dependency graph map and snake-case fields", () => {
+    expect(
+      normalizeSchemaDiffDependencyGraph({
+        nodes: {
+          table_a: { table_name: "table_a", depends_on: ["table_b"], depended_by: [] },
+        },
+      }),
+    ).toEqual({
+      nodes: [{ tableName: "table_a", dependsOn: ["table_b"], dependedBy: [] }],
     });
   });
 });

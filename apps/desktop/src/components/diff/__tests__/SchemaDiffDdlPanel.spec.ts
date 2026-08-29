@@ -18,4 +18,12 @@ describe("SchemaDiffDdlPanel diff highlighting", () => {
     expect(panelSource).toContain("rollbackForwardSql?: string;");
     expect(panelSource).toContain("props.rollbackForwardSql ?? props.deploySql");
   });
+
+  it("does not expose selected-SQL execution from the focused script tab", () => {
+    const focusedScript = panelSource.slice(panelSource.indexOf("<!-- Deploy Script -->"), panelSource.indexOf("<!-- Deploy Script All -->"));
+    const selectedScript = panelSource.slice(panelSource.indexOf("<!-- Deploy Script All -->"));
+
+    expect(focusedScript).not.toContain("$emit('executeScript')");
+    expect(selectedScript).toContain("$emit('executeScript')");
+  });
 });

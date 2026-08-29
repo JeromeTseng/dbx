@@ -465,10 +465,6 @@ function copyDeploySqlAll() {
             <Copy class="w-3 h-3" />
             {{ t("diff.copy") }}
           </Button>
-          <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" :disabled="canExecute === false" @click="$emit('executeScript')">
-            <Play class="w-3 h-3" />
-            {{ t("diff.execute") }}
-          </Button>
         </div>
       </div>
       <div class="flex-1 overflow-auto p-3">
