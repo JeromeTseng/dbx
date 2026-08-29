@@ -54,7 +54,7 @@ jobs:
       - name: Stage SQL Server legacy agent
         shell: pwsh
         run: |
-          $agent = Get-ChildItem "agents/drivers/sqlserver-legacy/build/libs/*-all.jar" | Select-Object -First 1
+          $agent = Get-ChildItem "agents/drivers/sqlserver-legacy/build/libs/dbx-agent-sqlserver-legacy.jar" | Select-Object -First 1
           if (!$agent) {
             Write-Error "Missing SQL Server legacy agent JAR"
             exit 1
