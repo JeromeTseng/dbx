@@ -164,6 +164,9 @@ afterEach(() => {
 });
 
 describe("QueryEditor completion Tab keymap", () => {
+  it("guards the batch INSERT snippet factory before applying", () => {
+    expect(queryEditorSource).toContain('if (session.mode === "insert" && !codeMirrorSnippetCompletion)');
+  });
   it("closes completion and suppresses its restart for the Enter newline", () => {
     const closeCompletion = vi.fn(() => true);
     let harness: TabHarness;
@@ -195,6 +198,26 @@ describe("QueryEditor completion Tab keymap", () => {
 
     expect(harness.insertNewlineWithoutCompletion(createView())).toBe(false);
     expect(harness.consumeSqlCompletionAutoStartSuppression()).toBe(false);
+  });
+
+  it("does not apply a stale batch selection after the completion popup closes", () => {
+    const applySelectedBatchColumnSelection = vi.fn(() => true);
+    const insertNewlineKeepIndent = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => null, applySelectedBatchColumnSelection, insertNewlineKeepIndent, acceptCompletionShortcut: "Tab" });
+    const view = createView();
+
+    expect(harness.handleEnter(view)).toBe(true);
+    expect(harness.handleTab(view)).toBe(true);
+    expect(applySelectedBatchColumnSelection).not.toHaveBeenCalled();
+    expect(insertNewlineKeepIndent).toHaveBeenCalled();
+  });
+
+  it("applies a batch selection only while the completion popup is active", () => {
+    const applySelectedBatchColumnSelection = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => "active", applySelectedBatchColumnSelection });
+
+    expect(harness.handleEnter(createView())).toBe(true);
+    expect(applySelectedBatchColumnSelection).toHaveBeenCalledOnce();
   });
 
   it("keeps CodeMirror prefix filtering enabled for SQL completion results", () => {

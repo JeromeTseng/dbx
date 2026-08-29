@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { batchColumnSelectionColumnList, batchColumnSelectionReplaceTo, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
+import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, isBatchColumnSelectionCompletionActive, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
 
 describe("batchColumnSelectionColumnList", () => {
   it("keeps a typed qualifier on every projection after the first", () => {
@@ -22,6 +22,40 @@ describe("batchColumnSelectionReplaceTo", () => {
 
   it("continues consuming a matching closing identifier quote", () => {
     expect(batchColumnSelectionReplaceTo({ to: 20, mode: "select", nextCharacter: '"', replaceClosingQuote: '"' })).toBe(21);
+  });
+});
+
+describe("batchColumnSelectionInsertReplacement", () => {
+  it("consumes whitespace before an existing closing parenthesis", () => {
+    expect(
+      batchColumnSelectionInsertReplacement({
+        document: "INSERT INTO users (id   )",
+        to: "INSERT INTO users (id".length,
+        columns: "id, name",
+        valuesKeyword: "VALUES",
+        valueCount: 2,
+      }),
+    ).toEqual({ replaceTo: "INSERT INTO users (id   )".length, insert: "id, name) VALUES (${1:value}, ${2:value})" });
+  });
+
+  it("does not duplicate an existing VALUES clause", () => {
+    expect(
+      batchColumnSelectionInsertReplacement({
+        document: "INSERT INTO users (id)  VALUES (1)",
+        to: "INSERT INTO users (id".length,
+        columns: "id, name",
+        valuesKeyword: "VALUES",
+        valueCount: 2,
+      }),
+    ).toEqual({ replaceTo: "INSERT INTO users (id)".length, insert: "id, name)" });
+  });
+});
+
+describe("isBatchColumnSelectionCompletionActive", () => {
+  it("only accepts a currently active completion popup", () => {
+    expect(isBatchColumnSelectionCompletionActive("active")).toBe(true);
+    expect(isBatchColumnSelectionCompletionActive("pending")).toBe(false);
+    expect(isBatchColumnSelectionCompletionActive(null)).toBe(false);
   });
 });
 

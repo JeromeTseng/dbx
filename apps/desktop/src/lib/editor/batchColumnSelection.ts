@@ -17,3 +17,18 @@ export function batchColumnSelectionReplaceTo(options: { to: number; mode: Batch
   const { to, mode, nextCharacter, replaceClosingQuote } = options;
   return replaceClosingQuote === nextCharacter || (mode === "insert" && nextCharacter === ")") ? to + 1 : to;
 }
+
+export function batchColumnSelectionInsertReplacement(options: { document: string; to: number; columns: string; valuesKeyword: "values" | "VALUES"; valueCount: number }): { replaceTo: number; insert: string } {
+  const suffix = options.document.slice(options.to);
+  const closingParenthesis = suffix.match(/^\s*\)/);
+  const replaceTo = closingParenthesis ? options.to + closingParenthesis[0].length : options.to;
+  const hasExistingValues = /^\s*\)\s*VALUES\b/i.test(suffix);
+  if (hasExistingValues) return { replaceTo, insert: `${options.columns})` };
+
+  const values = Array.from({ length: options.valueCount }, (_, index) => `\${${index + 1}:value}`).join(", ");
+  return { replaceTo, insert: `${options.columns}) ${options.valuesKeyword} (${values})` };
+}
+
+export function isBatchColumnSelectionCompletionActive(status: "active" | "pending" | null): boolean {
+  return status === "active";
+}
