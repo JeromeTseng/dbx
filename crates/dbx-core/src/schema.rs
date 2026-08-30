@@ -290,6 +290,9 @@ pub async fn get_sqlserver_completion_context_core(
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
         let db_config = connection_config(state, connection_id).await;
+        let completion_context_sql = db::sqlserver::completion_context_sql_for_profile(
+            db_config.as_ref().and_then(|config| config.driver_profile.as_deref()),
+        );
         let connections = state.connections.read().await;
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
             let config = config.clone();
@@ -301,7 +304,7 @@ pub async fn get_sqlserver_completion_context_core(
                     serde_json::json!({
                         "connection": config.as_ref(),
                         "database": database,
-                        "sql": db::sqlserver::completion_context_sql(),
+                        "sql": completion_context_sql,
                         "maxRows": 1
                     }),
                     agent_metadata_timeout(Some(config.as_ref())),
@@ -316,7 +319,7 @@ pub async fn get_sqlserver_completion_context_core(
             let result = client
                 .execute_query_with_timeout::<db::QueryResult>(
                     agent_execute_query_params(
-                        db::sqlserver::completion_context_sql(),
+                        completion_context_sql,
                         if database.is_empty() { None } else { Some(database) },
                         None,
                         QueryExecutionOptions { max_rows: Some(1), ..Default::default() },

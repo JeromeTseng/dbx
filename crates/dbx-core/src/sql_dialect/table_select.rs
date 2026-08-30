@@ -359,6 +359,10 @@ pub fn build_table_data_select_sql_with_database(
             &options.columns,
             limit,
             options.offset.unwrap_or(0),
+            options
+                .driver_profile
+                .as_deref()
+                .is_some_and(|profile| profile.trim().eq_ignore_ascii_case("sqlserver-legacy")),
         ),
         TablePaginationStrategy::QuestDbLimit => build_questdb_table_select_sql(
             &table_alias,
@@ -628,6 +632,7 @@ pub(super) fn build_sqlserver_table_select_sql(
     columns: &[String],
     limit: usize,
     offset: usize,
+    legacy_compatible: bool,
 ) -> String {
     let columns_sql = if columns.is_empty() {
         "*".to_string()
@@ -639,6 +644,9 @@ pub(super) fn build_sqlserver_table_select_sql(
             .join(", ")
     };
     let order = if order_by == "(SELECT NULL)" { String::new() } else { format!(" ORDER BY {order_by}") };
+    if legacy_compatible {
+        return format!("SELECT {columns_sql} FROM {table}{where_clause}{order}");
+    }
     if offset == 0 {
         return format!("SELECT TOP ({limit}) {columns_sql} FROM {table}{where_clause}{order}");
     }
@@ -863,5 +871,17 @@ mod tests {
             build_count_table_sql(Some(DatabaseType::VictoriaMetrics), None, "rack\\\"temperature"),
             r#"count({__name__="rack\\\"temperature"})"#
         );
+    }
+
+    #[test]
+    fn sqlserver_legacy_table_preview_leaves_paging_to_the_agent_cursor() {
+        let mut options = opts(DatabaseType::SqlServer, None, None, "users");
+        options.driver_profile = Some(" SQLSERVER-LEGACY ".to_string());
+        options.columns = vec!["id".to_string(), "name".to_string()];
+        options.order_by = Some("[id] ASC".to_string());
+        options.limit = Some(100);
+        options.offset = Some(100);
+
+        assert_eq!(build_table_data_select_sql(options), "SELECT [id], [name] FROM [users] ORDER BY [id] ASC");
     }
 }

@@ -1434,6 +1434,7 @@ async function loadServerFilterValues(columnIndex: number, searchValue: string) 
     const columnInfo = tableMeta.columns.find((column) => column.name === columnName);
     const sql = await buildDataGridColumnDistinctValuesSql({
       databaseType: resolvedDatabaseType.value,
+      driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
       database: tableMeta.database,

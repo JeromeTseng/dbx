@@ -4661,7 +4661,7 @@ export const useQueryStore = defineStore("query", () => {
       const targetDatabase = resumedExecutionTarget ? resumedExecutionTarget.database : targetContext?.scope === "connection" ? "" : (contextDatabase ?? executionTarget?.database ?? tab.database);
       const targetSchema = resumedExecutionTarget ? resumedExecutionTarget.schema : targetContext?.scope === "connection" ? undefined : (databaseTargetContext?.schema ?? executionTarget?.schema ?? tab.schema);
       const executionDatabase = dataTabExecutionDatabase(conn, targetDatabase, executionCatalog);
-      const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
+      const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
       if (!batchResume) {
         const statementExecution =
@@ -5269,6 +5269,7 @@ export const useQueryStore = defineStore("query", () => {
         const pagination = limitQueryPagination(requestedPagination, queryResultMaxRows);
         pageLimit = pagination.limit;
         pageOffset = pagination.offset;
+        useAgentResultSession = conn?.db_type === "sqlserver" && conn?.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
       }
 
       const executionSchema = connectionQueryExecutionSchema(conn, targetDatabase, targetSchema, tab.mode === "data");
@@ -6433,6 +6434,8 @@ export const useQueryStore = defineStore("query", () => {
       let offset = 0;
       const clientSessionId = tabClientSessionId(tab, "export");
       const exportExecutionId = uuid();
+      const useAgentCursor = conn?.db_type === "sqlserver" && conn?.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
+      let sessionId: string | undefined;
 
       try {
         while (true) {
@@ -6452,23 +6455,43 @@ export const useQueryStore = defineStore("query", () => {
             limit: pageLimit,
             offset,
           });
-          const results = await api.executeMulti(tab.connectionId, executionDatabase, sql, undefined, exportExecutionId, {
-            maxRows: pageLimit,
-            fetchSize: pageLimit,
-            clientSessionId,
-            catalog: tableMeta.catalog,
-            timeoutSecs: queryTimeoutSecs,
-          });
+          const results = await api.executeMulti(
+            tab.connectionId,
+            executionDatabase,
+            sql,
+            undefined,
+            exportExecutionId,
+            useAgentCursor
+              ? {
+                  maxRows: 2_147_483_647,
+                  fetchSize: pageLimit,
+                  pageSize: pageLimit,
+                  resultSessionId: sessionId,
+                  clientSessionId,
+                  catalog: tableMeta.catalog,
+                  timeoutSecs: queryTimeoutSecs,
+                }
+              : {
+                  maxRows: pageLimit,
+                  fetchSize: pageLimit,
+                  clientSessionId,
+                  catalog: tableMeta.catalog,
+                  timeoutSecs: queryTimeoutSecs,
+                },
+          );
           const result = results[0];
           if (!result) break;
           if (columns.length === 0) columns = result.columns;
           rows.push(...result.rows);
           executionTimeMs += result.execution_time_ms ?? 0;
           onProgress?.({ rowsExported: rows.length, totalRows });
-          if (result.rows.length < pageLimit) break;
+          sessionId = result.session_id ?? undefined;
+          const shouldFetchNextPage = useAgentCursor ? result.has_more === true : result.rows.length >= pageLimit;
+          if (!shouldFetchNextPage) break;
           offset += result.rows.length;
         }
       } finally {
+        if (sessionId) void api.closeQuerySession(tab.connectionId, executionDatabase, sessionId, clientSessionId, tableMeta.catalog);
         void closeClientSessionId(tab.connectionId, executionDatabase, clientSessionId, tableMeta.catalog, { tabId: tab.id });
       }
 
@@ -6496,7 +6519,7 @@ export const useQueryStore = defineStore("query", () => {
     // main 引入全局查询超时：queryTimeoutSecsForConnection 现需传入全局默认值；
     // settingsStore 取 defineStore 顶层声明的实例（本函数无局部覆盖）。
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
-    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
+    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
     const queryBaseSql = queryResultBaseSql(tab);
     const exportSettings = useSettingsStore().editorSettings;
     const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
@@ -6637,7 +6660,7 @@ export const useQueryStore = defineStore("query", () => {
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
     if (effectiveDbType === "mongodb") return undefined;
-    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
+    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
     const queryBaseSql = queryResultBaseSql(tab);
     const resultStatementIndex = tab.result.statement_index;
     const batchSql = tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
@@ -6695,7 +6718,7 @@ export const useQueryStore = defineStore("query", () => {
       sql,
       queryBaseSql: sql,
       databaseType: effectiveDbType,
-      useAgentCursor: usesAgentCursorForQuery(conn?.db_type),
+      useAgentCursor: usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile),
       filePath,
       format,
       pageSize: settings.exportBatchSize,

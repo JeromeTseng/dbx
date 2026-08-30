@@ -131,6 +131,14 @@ pub fn completion_context_sql() -> &'static str {
     SQLSERVER_COMPLETION_CONTEXT_SQL
 }
 
+pub fn completion_context_sql_for_profile(driver_profile: Option<&str>) -> &'static str {
+    if driver_profile.is_some_and(|profile| profile.trim().eq_ignore_ascii_case(SQLSERVER_LEGACY_DRIVER_PROFILE)) {
+        "SELECT TOP 1 u.name AS default_schema, 1 AS engine_edition FROM sysusers u WHERE u.name = USER_NAME()"
+    } else {
+        completion_context_sql()
+    }
+}
+
 pub fn completion_context_from_query_result(result: QueryResult) -> Result<SqlServerCompletionContext, String> {
     let row = result.rows.first().ok_or_else(|| "SQL Server completion context query returned no rows".to_string())?;
     let default_schema = row.first().and_then(serde_json::Value::as_str);
@@ -4138,6 +4146,17 @@ mod tests {
         assert!(SQLSERVER_COMPLETION_CONTEXT_SQL.contains("sys.schemas"));
         assert!(SQLSERVER_COMPLETION_CONTEXT_SQL.contains("N'dbo'"));
         assert!(SQLSERVER_COMPLETION_CONTEXT_SQL.contains("EngineEdition"));
+    }
+
+    #[test]
+    fn sqlserver_legacy_completion_context_uses_sql_server_2000_catalogs() {
+        let sql = super::completion_context_sql_for_profile(Some(" SQLSERVER-LEGACY "));
+        assert_eq!(
+            sql,
+            "SELECT TOP 1 u.name AS default_schema, 1 AS engine_edition FROM sysusers u WHERE u.name = USER_NAME()"
+        );
+        assert!(!sql.contains("sys.schemas"));
+        assert!(!sql.contains("SERVERPROPERTY"));
     }
 
     #[test]

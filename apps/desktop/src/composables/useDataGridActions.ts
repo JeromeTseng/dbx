@@ -362,8 +362,13 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     tab.whereInput = whereInput ?? "";
     const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy });
     queryStore.updateSql(tab.id, sql);
+    const expectedNextOffset = appendResult ? tab.result?.rows.length : (tab.resultPageOffset ?? 0) + (tab.resultPageLimit ?? limit);
+    const continuesResultSession = offset === expectedNextOffset && limit === tab.resultPageLimit;
+    const connection = useConnectionStore().getConfig(tab.connectionId);
+    const isSqlServerLegacy = connection?.db_type === "sqlserver" && connection.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
+    const sessionId = isSqlServerLegacy && tab.result?.has_more && tab.result.session_id && continuesResultSession ? tab.result.session_id : undefined;
     await queryStore.executeTabSql(tab.id, sql, {
-      pagination: { offset, limit },
+      pagination: { offset, limit, sessionId, clientSessionId: sessionId ? tab.resultClientSessionId : undefined },
       ...appendOptions,
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,

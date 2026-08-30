@@ -89,6 +89,7 @@ export interface DataGridColumnValuesFilterConditionOptions {
 
 export interface DataGridColumnDistinctValuesSqlOptions {
   databaseType?: DatabaseType;
+  driverProfile?: string;
   identifierQuote?: string;
   catalog?: string;
   database?: string;
