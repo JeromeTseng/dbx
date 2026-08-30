@@ -120,9 +120,9 @@ describe("QueryEditor batch column selection", () => {
     const tabEnd = source.indexOf("\n}\n\nfunction clearPendingCompletionTab", tabStart);
 
     expect(source).toContain("function applySelectedBatchColumnSelection");
-    expect(source.slice(handleEnterStart, handleEnterEnd)).toContain("if (applySelectedBatchColumnSelection(view)) return true;");
+    expect(source.slice(handleEnterStart, handleEnterEnd)).toContain("if (isBatchColumnSelectionCompletionActive(codeMirrorCompletionStatus?.(view.state) ?? null) && applySelectedBatchColumnSelection(view)) return true;");
     expect(source.slice(handleEnterStart, handleEnterEnd)).toContain("if (codeMirrorAcceptCompletion?.(view)) return true;");
-    expect(source.slice(tabStart, tabEnd)).toContain("if (applySelectedBatchColumnSelection(view)) return true;");
+    expect(source.slice(tabStart, tabEnd)).toContain("if (isBatchColumnSelectionCompletionActive(completionStatus) && applySelectedBatchColumnSelection(view)) return true;");
     expect(source).toContain("defaultKeymap: false");
     expect(source).toContain('{ key: "ArrowDown", run: (view) => moveCompletion(view, true) }');
     expect(source).toContain('{ key: "ArrowUp", run: (view) => moveCompletion(view, false) }');

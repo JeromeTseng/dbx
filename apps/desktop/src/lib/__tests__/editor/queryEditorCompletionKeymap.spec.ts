@@ -95,6 +95,7 @@ function createHarness(options: {
   }).outputText;
   const factory = new Function(
     "codeMirrorCompletionStatus",
+    "isBatchColumnSelectionCompletionActive",
     "codeMirrorAcceptCompletion",
     "codeMirrorSelectedCompletionIndex",
     "codeMirrorSelectFirstCompletion",
@@ -114,6 +115,7 @@ function createHarness(options: {
   );
   return factory(
     options.completionStatus,
+    (status: "active" | "pending" | null) => status === "active",
     options.acceptCompletion ?? (() => false),
     options.selectedCompletionIndex ?? (() => 0),
     options.selectFirstCompletion ?? (() => false),
