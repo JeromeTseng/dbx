@@ -77,12 +77,16 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     @Override
     protected Connection openConnection(ConnectParams params) throws Exception {
         sqlServer2000Mode = false;
+        logConnectionEvent("mssql-jdbc attempt", params, null);
         try {
             Connection connection = super.openConnection(params);
             sqlServer2000Mode = false;
+            logConnectionEvent("mssql-jdbc connected", params, null);
             return connection;
         } catch (SQLException error) {
+            logConnectionEvent("mssql-jdbc failed", params, error);
             if (isSqlServer2000Unsupported(error)) {
+                logConnectionEvent("switching to jTDS 1.3.1 fallback", params, null);
                 try {
                     Class.forName(JTDS_DRIVER_CLASS);
                     Connection connection = DriverManager.getConnection(
@@ -91,11 +95,14 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
                         params.getPassword()
                     );
                     sqlServer2000Mode = true;
+                    logConnectionEvent("jTDS 1.3.1 connected", params, null);
                     return connection;
                 } catch (SQLException fallbackError) {
+                    logConnectionEvent("jTDS 1.3.1 failed", params, fallbackError);
                     fallbackError.addSuppressed(error);
                     throw withLegacyTlsDiagnostics(fallbackError, "jTDS 1.3.1");
                 } catch (ClassNotFoundException fallbackError) {
+                    logConnectionEvent("jTDS 1.3.1 class missing", params, fallbackError);
                     SQLException wrapped = new SQLException(
                         "SQL Server 2000 fallback driver is not available",
                         error.getSQLState(),
@@ -115,6 +122,29 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         // jTDS can establish a SQL Server 2000 session but its JDBC 4
         // isValid() implementation is not reliable on this legacy endpoint.
         return "SELECT 1";
+    }
+
+    private static void logConnectionEvent(String stage, ConnectParams params, Throwable error) {
+        String detail = error == null ? "" : ", error=" + sanitizeDiagnostic(error.getClass().getSimpleName() + ": " + error.getMessage());
+        System.err.println(
+            "[sqlserver-legacy] " + stage
+                + ", host=" + sanitizeDiagnostic(params.getHost())
+                + ", port=" + params.getPort()
+                + ", portExplicit=" + params.isPort_explicit()
+                + ", database=" + sanitizeDiagnostic(params.getDatabase())
+                + ", usernamePresent=" + (params.getUsername() != null && !params.getUsername().isBlank())
+                + detail
+        );
+    }
+
+    private static String sanitizeDiagnostic(String value) {
+        if (value == null || value.isBlank()) {
+            return "<empty>";
+        }
+        return value
+            .replaceAll("(?i)(password|passwd|pwd)\\s*[=:]\\s*[^;,&\\s]+", "$1=<redacted>")
+            .replace('\r', ' ')
+            .replace('\n', ' ');
     }
 
     @Override
