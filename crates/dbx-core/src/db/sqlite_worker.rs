@@ -92,9 +92,9 @@ pub struct SqliteWorkerClient {
 enum WorkerIo {
     #[allow(dead_code)]
     Process {
-        child: Child,
-        stdin: ChildStdin,
-        stdout: BufReader<tokio::process::ChildStdout>,
+        child: Box<Child>,
+        stdin: Box<ChildStdin>,
+        stdout: Box<BufReader<tokio::process::ChildStdout>>,
     },
     Ssh {
         stream: BufReader<DynStream>,
@@ -690,10 +690,13 @@ fn remote_exec_status(exit_status: Option<u32>) -> Result<(), String> {
 }
 
 fn validate_remote_download(copied: u64, exit_status: Option<u32>) -> Result<(), String> {
+    // Check exit status first: a failed `cat` with empty output is better
+    // explained by the nonzero status than by the emptiness it caused.
+    remote_exec_status(exit_status)?;
     if copied == 0 {
         return Err("Downloaded SQLite backup was empty".to_string());
     }
-    remote_exec_status(exit_status)
+    Ok(())
 }
 
 async fn verify_remote_digest(session: &Handle<SshClient>, path: &str, digest: &str) -> Result<(), String> {
