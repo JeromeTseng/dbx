@@ -111,6 +111,13 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    protected String connectionValidationQuery() {
+        // jTDS can establish a SQL Server 2000 session but its JDBC 4
+        // isValid() implementation is not reliable on this legacy endpoint.
+        return "SELECT 1";
+    }
+
+    @Override
     public void disconnect() {
         try {
             super.disconnect();

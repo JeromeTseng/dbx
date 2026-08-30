@@ -106,6 +106,11 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
+    void usesSelectOneForLegacyConnectionValidation() {
+        Assertions.assertEquals("SELECT 1", new SqlServerLegacyAgent().connectionValidationQuery());
+    }
+
+    @Test
     void connectionErrorsPreserveDetailsAndIncludeRuntimeDiagnostics() {
         SQLException original = new SQLException("TLS handshake failed", "08001", 1234);
 
