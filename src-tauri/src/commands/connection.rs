@@ -1024,6 +1024,9 @@ fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqli
         .collect()
 }
 
+// Thin wrapper for the test suite below: production callers all go through
+// `connect_sqlite_from_config_with_state` with a real AppState.
+#[cfg(test)]
 async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sqlite::SqliteHandle, String> {
     connect_sqlite_from_config_with_state(None, config.id.as_str(), config).await
 }
