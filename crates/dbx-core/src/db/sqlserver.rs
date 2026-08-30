@@ -1082,13 +1082,22 @@ fn build_sqlserver_unsafe_type_query(
         if statement.inner.lines().last().is_some_and(|line| line.contains("--")) { "\n" } else { "" };
 
     // Re-apply the original ORDER BY / OFFSET / FETCH on the outer query so
-    // ordering and pagination survive the derived-table rewrite. When the sort
-    // keys cannot be safely migrated, refuse the rewrite rather than silently
-    // dropping order semantics (callers fall back to the plain statement).
-    let order_by = match &statement.order_by {
+    // ordering and pagination survive the derived-table rewrite. If a sort key
+    // is not part of the projection, keep the original ordering inside the
+    // derived table instead of falling back to the unsafe sql_variant query.
+    let mut inner = statement.inner;
+    let order_by = match statement.order_by {
         Some(order_by) => {
-            let outer_order_by = sqlserver_outer_order_by(order_by, columns)?;
-            format!(" {outer_order_by}")
+            if let Some(outer_order_by) = sqlserver_outer_order_by(&order_by, columns) {
+                format!(" {outer_order_by}")
+            } else {
+                if !has_top_level_top(&inner) {
+                    inner = add_sqlserver_top_percent(&inner);
+                    inner.push(' ');
+                    inner.push_str(&order_by);
+                }
+                String::new()
+            }
         }
         None => String::new(),
     };
@@ -1096,11 +1105,19 @@ fn build_sqlserver_unsafe_type_query(
     Some(SqlServerUnsafeTypeQuery {
         sql: format!(
             "{}SELECT {select_list} FROM ({}{inner_closing_line_break}) AS {source_alias}({source_alias_list}){order_by}",
-            statement.prefix, statement.inner
+            statement.prefix, inner
         ),
         spatial_columns,
         restored_columns,
     })
+}
+
+fn add_sqlserver_top_percent(sql: &str) -> String {
+    let Some(select) = top_level_sqlserver_tokens(sql).into_iter().find(|token| token.text == "SELECT") else {
+        return sql.to_string();
+    };
+    let select_end = select.start + "SELECT".len();
+    format!("{} TOP (100) PERCENT{}", &sql[..select_end], &sql[select_end..])
 }
 
 fn is_sqlserver_unsafe_column(column: &SqlServerDescribedColumn) -> bool {
@@ -1201,8 +1218,7 @@ fn normalized_sqlserver_select_statement(sql: &str) -> Option<SqlServerNormalize
 /// ordering cannot be guaranteed on the outer query. `None` covers ORDER BY keys
 /// that reference columns absent from the projection, non-trivial expressions,
 /// and keys targeting transformed columns whose original ordering cannot be
-/// preserved; callers must then fall back to executing the plain statement
-/// rather than silently dropping order and pagination semantics.
+/// preserved; callers keep the original ordering inside the derived table.
 fn sqlserver_outer_order_by(order_by: &str, columns: &[SqlServerDescribedColumn]) -> Option<String> {
     // OFFSET/FETCH carry no column references, so keep that tail verbatim and
     // rebuild only the sort-key list against the outer projection.
@@ -4904,67 +4920,102 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_falls_back_when_order_by_cannot_be_migrated() {
-        // ORDER BY references a column absent from the projection: cannot be
-        // re-applied on the outer query, so the rewrite must be refused rather
-        // than silently dropping order semantics.
-        assert_eq!(
-            build_sqlserver_unsafe_type_query(
-                "SELECT polygon FROM dbo.t ORDER BY landId",
-                &[SqlServerDescribedColumn {
+    fn sqlserver_keeps_unmapped_order_by_inside_variant_rewrite() {
+        // ORDER BY references a column absent from the projection. Keep it in
+        // the inner query so the sql_variant result is still cast safely.
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT id, value FROM sys.extended_properties ORDER BY major_id",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("value".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten.sql.contains(
+            "FROM (SELECT TOP (100) PERCENT id, value FROM sys.extended_properties ORDER BY major_id) AS [dbx_unsafe_source]"
+        ));
+        assert!(!rewritten.sql.ends_with("ORDER BY [major_id]"));
+
+        // Non-trivial ORDER BY expressions use the same safe inner fallback.
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT id, value FROM sys.extended_properties ORDER BY UPPER(id)",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("value".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.sql.contains("ORDER BY UPPER(id)"));
+        assert!(rewritten.sql.contains("SELECT TOP (100) PERCENT"));
+
+        // ORDER BY targeting a rewritten geometry column keeps the native
+        // ordering inside the derived table rather than ordering by WKT.
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT id, polygon FROM dbo.t ORDER BY polygon",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
                     name: Some("polygon".to_string()),
                     system_type_name: Some("geometry".to_string()),
                     user_type_schema: Some("sys".to_string()),
                     user_type_name: Some("geometry".to_string()),
-                }],
-            ),
-            None
-        );
+                },
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.sql.contains("ORDER BY polygon"));
+        assert!(rewritten.sql.contains("SELECT TOP (100) PERCENT"));
+    }
 
-        // Non-trivial ORDER BY expression: cannot be re-applied safely.
-        assert_eq!(
-            build_sqlserver_unsafe_type_query(
-                "SELECT id, polygon FROM dbo.t ORDER BY UPPER(id)",
-                &[
-                    SqlServerDescribedColumn {
-                        name: Some("id".to_string()),
-                        system_type_name: Some("int".to_string()),
-                        user_type_schema: None,
-                        user_type_name: None,
-                    },
-                    SqlServerDescribedColumn {
-                        name: Some("polygon".to_string()),
-                        system_type_name: Some("geometry".to_string()),
-                        user_type_schema: Some("sys".to_string()),
-                        user_type_name: Some("geometry".to_string()),
-                    },
-                ],
-            ),
-            None
-        );
+    #[test]
+    fn sqlserver_does_not_duplicate_top_query_order_by_in_variant_rewrite() {
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT TOP 10 id, value FROM dbo.t ORDER BY source_id",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("value".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
 
-        // ORDER BY targeting a rewritten geometry column would order by the WKT
-        // string instead of the geometry value: refuse rather than change semantics.
-        assert_eq!(
-            build_sqlserver_unsafe_type_query(
-                "SELECT id, polygon FROM dbo.t ORDER BY polygon",
-                &[
-                    SqlServerDescribedColumn {
-                        name: Some("id".to_string()),
-                        system_type_name: Some("int".to_string()),
-                        user_type_schema: None,
-                        user_type_name: None,
-                    },
-                    SqlServerDescribedColumn {
-                        name: Some("polygon".to_string()),
-                        system_type_name: Some("geometry".to_string()),
-                        user_type_schema: Some("sys".to_string()),
-                        user_type_name: Some("geometry".to_string()),
-                    },
-                ],
-            ),
-            None
-        );
+        assert_eq!(rewritten.sql.matches("ORDER BY source_id").count(), 1);
+        assert!(rewritten.sql.contains("FROM (SELECT TOP 10 id, value FROM dbo.t ORDER BY source_id)"));
     }
 
     #[test]
