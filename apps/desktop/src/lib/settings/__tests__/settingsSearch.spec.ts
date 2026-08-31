@@ -241,6 +241,7 @@ describe("settings search", () => {
       { titleKey: "settings.prefillNewQueryWithSelect", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.generateSqlIncludeDatabaseName", category: "editor", targetId: "editor" },
       { titleKey: "settings.formatSqlOnSqlFileSave", category: "editor", targetId: "editor" },
+      { titleKey: "settings.showTableDdlHoverPreview", category: "editor", targetId: "editor" },
       { titleKey: "settings.sqlFormatterKeywordCase", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterFunctionCase", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterDataTypeCase", category: "formatter", targetId: "formatter" },

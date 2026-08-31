@@ -272,6 +272,7 @@ const props = defineProps<{
   prefillDatabase?: string;
   prefillSchema?: string;
   focusTableName?: string;
+  focusTableNames?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -395,6 +396,8 @@ const tableMap = computed(() => new Map(tables.value.map((table) => [table.name,
 const allRelationships = computed(() => buildDiagramRelationships(tables.value, customRelationships.value));
 
 const relatedTableNames = computed(() => {
+  const selected = props.focusTableNames?.filter((name) => name.trim());
+  if (selected && selected.length > 1) return new Set(selected);
   const focus = props.focusTableName;
   const names = new Set<string>();
   if (!focus) return names;
@@ -411,6 +414,9 @@ const visibleTables = computed(() => {
     tables.value.filter((table) => !table.pendingDrop),
     tableSearch.value,
   );
+  if ((props.focusTableNames?.length ?? 0) > 1 && !showAllTables.value && !tableSearch.value.trim()) {
+    return filtered.filter((table) => relatedTableNames.value.has(table.name));
+  }
   if (props.focusTableName && !showAllTables.value && !tableSearch.value.trim()) {
     return filtered.filter((table) => relatedTableNames.value.has(table.name));
   }
@@ -1788,7 +1794,7 @@ function handleKeydown(e: KeyboardEvent) {
       return;
     }
   }
-  if (e.key === " " || e.key === "Spacebar") {
+  if (!typing && (e.key === " " || e.key === "Spacebar")) {
     e.preventDefault();
     isSpacePressed.value = true;
   }

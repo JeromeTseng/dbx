@@ -131,6 +131,14 @@ pub fn completion_context_sql() -> &'static str {
     SQLSERVER_COMPLETION_CONTEXT_SQL
 }
 
+pub fn completion_context_sql_for_profile(driver_profile: Option<&str>) -> &'static str {
+    if driver_profile.is_some_and(|profile| profile.trim().eq_ignore_ascii_case(SQLSERVER_LEGACY_DRIVER_PROFILE)) {
+        "SELECT TOP 1 u.name AS default_schema, 1 AS engine_edition FROM sysusers u WHERE u.name = USER_NAME()"
+    } else {
+        completion_context_sql()
+    }
+}
+
 pub fn completion_context_from_query_result(result: QueryResult) -> Result<SqlServerCompletionContext, String> {
     let row = result.rows.first().ok_or_else(|| "SQL Server completion context query returned no rows".to_string())?;
     let default_schema = row.first().and_then(serde_json::Value::as_str);
@@ -2390,9 +2398,11 @@ fn sqlserver_list_tables_sql_with_kind(
 
     // Use SELECT TOP for broad SQL Server version compatibility.
     // OFFSET / FETCH NEXT is only available in SQL Server 2012+.
+    // Keep the requested limit intact: the sidebar requests page_size + 1 to
+    // detect whether it should render a load-more node.
     match (limit, offset) {
         (Some(limit), Some(offset)) if offset > 0 => {
-            let end = offset + limit.min(1000);
+            let end = offset + limit;
             format!(
                 "SELECT * FROM (\
                  SELECT {base_columns}, ROW_NUMBER() OVER ({order_by}) AS __dbx_rn \
@@ -2401,7 +2411,7 @@ fn sqlserver_list_tables_sql_with_kind(
             )
         }
         (Some(limit), _) => {
-            format!("SELECT TOP ({}) {base_columns} {base_from} {base_where} {order_by}", limit.min(1000))
+            format!("SELECT TOP ({}) {base_columns} {base_from} {base_where} {order_by}", limit)
         }
         _ => {
             format!("SELECT {base_columns} {base_from} {base_where} {order_by}")
@@ -2865,7 +2875,7 @@ pub async fn list_triggers(
             level: None,
             condition: None,
             language: None,
-            enabled: None,
+            enabled: row.get::<bool, _>(4),
             valid: None,
             comment: None,
             created_at: None,
@@ -2876,10 +2886,16 @@ pub async fn list_triggers(
 
 fn sqlserver_triggers_sql(schema: &str, table: &str) -> String {
     format!(
-        "SELECT t.name, te.type_desc, CASE WHEN t.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END, \
-         OBJECT_DEFINITION(t.object_id) \
+        "SELECT t.name, \
+         STUFF((SELECT ', ' + te2.type_desc \
+                FROM sys.trigger_events te2 \
+                WHERE te2.object_id = t.object_id \
+                ORDER BY te2.type_desc \
+                FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, ''), \
+         CASE WHEN t.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END, \
+         OBJECT_DEFINITION(t.object_id), \
+         CASE WHEN t.is_disabled = 1 THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END \
          FROM sys.triggers t \
-         JOIN sys.trigger_events te ON t.object_id = te.object_id \
          WHERE t.parent_id = OBJECT_ID('{s}.{t}') \
          ORDER BY t.name",
         s = schema.replace('\'', "''"),
@@ -4132,7 +4148,9 @@ mod tests {
         let sql = sqlserver_triggers_sql("d'bo", "t'able");
 
         assert!(sql.contains("OBJECT_DEFINITION(t.object_id)"));
-        assert!(sql.contains("JOIN sys.trigger_events te ON t.object_id = te.object_id"));
+        assert!(sql.contains("STUFF((SELECT ', ' + te2.type_desc"));
+        assert!(sql.contains("FOR XML PATH(''), TYPE"));
+        assert!(sql.contains("t.is_disabled"));
         assert!(sql.contains("OBJECT_ID('d''bo.t''able')"));
         assert!(sql.contains("ORDER BY t.name"));
         assert!(!sql.contains("STRING_AGG"));
@@ -4169,6 +4187,17 @@ mod tests {
         assert!(SQLSERVER_COMPLETION_CONTEXT_SQL.contains("sys.schemas"));
         assert!(SQLSERVER_COMPLETION_CONTEXT_SQL.contains("N'dbo'"));
         assert!(SQLSERVER_COMPLETION_CONTEXT_SQL.contains("EngineEdition"));
+    }
+
+    #[test]
+    fn sqlserver_legacy_completion_context_uses_sql_server_2000_catalogs() {
+        let sql = super::completion_context_sql_for_profile(Some(" SQLSERVER-LEGACY "));
+        assert_eq!(
+            sql,
+            "SELECT TOP 1 u.name AS default_schema, 1 AS engine_edition FROM sysusers u WHERE u.name = USER_NAME()"
+        );
+        assert!(!sql.contains("sys.schemas"));
+        assert!(!sql.contains("SERVERPROPERTY"));
     }
 
     #[test]
@@ -4261,6 +4290,15 @@ mod tests {
         assert!(!sql.contains("o.type IN ('U','V')"));
         assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY o.name)"));
         assert!(sql.contains("__dbx_rn > 100 AND __dbx_rn <= 201"));
+    }
+
+    #[test]
+    fn sqlserver_table_objects_sql_preserves_sidebar_probe_limits_above_1000() {
+        let first_page = sqlserver_table_objects_sql("dbo", None, Some(1001), None);
+        let next_page = sqlserver_table_objects_sql("dbo", None, Some(1001), Some(1000));
+
+        assert!(first_page.contains("SELECT TOP (1001)"));
+        assert!(next_page.contains("__dbx_rn > 1000 AND __dbx_rn <= 2001"));
     }
 
     #[test]

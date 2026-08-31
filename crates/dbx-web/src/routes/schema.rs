@@ -64,6 +64,16 @@ pub async fn list_database_storage(
     Ok(Json(result))
 }
 
+pub async fn list_xugu_tablespaces(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<dbx_core::db::XuguTablespaceInfo>>, AppError> {
+    let result = dbx_core::schema::list_xugu_tablespaces_core(&state.app, &q.connection_id, q.database.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn get_sqlserver_completion_context(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
