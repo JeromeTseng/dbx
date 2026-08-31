@@ -1100,8 +1100,19 @@ fn build_sqlserver_unsafe_type_query(
                 format!(" {outer_order_by}")
             } else {
                 if !has_top_level_top(&inner) {
-                    inner = add_sqlserver_top_percent(&inner);
-                    inner.push(' ');
+                    // TOP cannot combine with OFFSET/FETCH in the same query
+                    // scope, and an OFFSET/FETCH tail already makes ORDER BY
+                    // legal inside a derived table, so the TOP (100) PERCENT
+                    // crutch is only needed for plain ORDER BY clauses.
+                    if !top_level_sqlserver_tokens(&order_by).iter().any(|token| token.text == "OFFSET") {
+                        inner = add_sqlserver_top_percent(&inner);
+                    }
+                    // A trailing `--` comment would swallow the appended ORDER
+                    // BY, so break the line first (the same hazard the closing
+                    // separator above guards against).
+                    let order_by_separator =
+                        if inner.lines().last().is_some_and(|line| line.contains("--")) { '\n' } else { ' ' };
+                    inner.push(order_by_separator);
                     inner.push_str(&order_by);
                 }
                 String::new()
@@ -1121,11 +1132,17 @@ fn build_sqlserver_unsafe_type_query(
 }
 
 fn add_sqlserver_top_percent(sql: &str) -> String {
-    let Some(select) = top_level_sqlserver_tokens(sql).into_iter().find(|token| token.text == "SELECT") else {
+    let tokens = top_level_sqlserver_tokens(sql);
+    let Some(select_index) = tokens.iter().position(|token| token.text == "SELECT") else {
         return sql.to_string();
     };
-    let select_end = select.start + "SELECT".len();
-    format!("{} TOP (100) PERCENT{}", &sql[..select_end], &sql[select_end..])
+    // TOP must follow the optional ALL/DISTINCT quantifier; inserting it right
+    // after SELECT would produce the invalid `SELECT TOP ... DISTINCT ...`.
+    let insert_end = match tokens.get(select_index + 1) {
+        Some(token) if matches!(token.text.as_str(), "ALL" | "DISTINCT") => token.start + token.text.len(),
+        _ => tokens[select_index].start + "SELECT".len(),
+    };
+    format!("{} TOP (100) PERCENT{}", &sql[..insert_end], &sql[insert_end..])
 }
 
 fn is_sqlserver_unsafe_column(column: &SqlServerDescribedColumn) -> bool {
@@ -5029,6 +5046,116 @@ mod tests {
         .unwrap();
         assert!(rewritten.sql.contains("ORDER BY polygon"));
         assert!(rewritten.sql.contains("SELECT TOP (100) PERCENT"));
+    }
+
+    #[test]
+    fn sqlserver_skips_top_percent_when_inner_order_by_carries_offset_fetch() {
+        // TOP cannot combine with OFFSET/FETCH in the same query scope, and the
+        // OFFSET/FETCH tail already makes ORDER BY legal inside the derived
+        // table, so the inner fallback must not inject TOP (100) PERCENT.
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT id, value FROM sys.extended_properties ORDER BY major_id OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("value".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten.sql.contains(
+            "FROM (SELECT id, value FROM sys.extended_properties ORDER BY major_id OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY) AS [dbx_unsafe_source]"
+        ));
+        assert!(!rewritten.sql.contains("TOP (100) PERCENT"));
+    }
+
+    #[test]
+    fn sqlserver_adds_top_percent_after_distinct_quantifier() {
+        // TOP must follow the optional ALL/DISTINCT quantifier; inserting it
+        // right after SELECT would produce invalid T-SQL.
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT DISTINCT id, value FROM sys.extended_properties ORDER BY major_id",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("value".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten
+            .sql
+            .contains("SELECT DISTINCT TOP (100) PERCENT id, value FROM sys.extended_properties ORDER BY major_id"));
+        assert!(!rewritten.sql.contains("TOP (100) PERCENT DISTINCT"));
+
+        let rewritten_all = build_sqlserver_unsafe_type_query(
+            "SELECT ALL id, value FROM sys.extended_properties ORDER BY major_id",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("value".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten_all.sql.contains("SELECT ALL TOP (100) PERCENT id, value FROM sys.extended_properties"));
+    }
+
+    #[test]
+    fn sqlserver_appends_inner_order_by_on_a_new_line_after_line_comment() {
+        // The derived table's last line ends with a `--` comment, so the
+        // appended ORDER BY must start on a new line instead of being
+        // swallowed by the comment.
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT id, value\nFROM sys.extended_properties -- keep source comment\nORDER BY major_id",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("value".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten.sql.contains(
+            "FROM (SELECT TOP (100) PERCENT id, value\nFROM sys.extended_properties -- keep source comment\nORDER BY major_id\n) AS [dbx_unsafe_source]"
+        ));
+        assert!(!rewritten.sql.contains("-- keep source comment ORDER BY"));
     }
 
     #[test]
