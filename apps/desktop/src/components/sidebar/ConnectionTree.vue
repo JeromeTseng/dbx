@@ -382,8 +382,9 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
   const preservesSearchSubtree = ancestorPreservesSearchSubtree || (!!refreshedNodeIds && !!preservesNodeSubtree?.(node));
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
     if (store.connectedIds.has(node.connectionId) && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
+      const connectionId = node.connectionId;
       scheduledNodeIds?.add(node.id);
-      tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(node.connectionId));
+      tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(connectionId));
     }
     if (node.connectionId !== store.activeConnectionId) return;
   }

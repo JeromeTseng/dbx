@@ -14,8 +14,7 @@ export async function runSidebarSearchTasks(
       const task = tasks[nextTaskIndex++];
       try {
         await task();
-      } catch {
-      }
+      } catch {}
     }
   });
   await Promise.all(workers);
