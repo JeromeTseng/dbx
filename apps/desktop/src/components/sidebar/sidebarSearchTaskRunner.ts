@@ -18,3 +18,5 @@ export async function runSidebarSearchTasks(
       }
     }
   });
+  await Promise.all(workers);
+}
