@@ -724,7 +724,7 @@ function getModelsForConfig(configId: string) {
   return aiModelOptions(config, modelCatalogs.get(configId)?.models ?? []);
 }
 
-function aiConfigProviderLabel(config: AiConfigItem | null | undefined): string {
+function aiConfigProviderLabel(config: { provider: AiConfigItem["provider"]; endpoint: string } | null | undefined): string {
   if (!config) return aiProviderLabel("claude", t);
   const preset = getAiProviderPreset(config.provider, config.endpoint);
   return preset.provider === "custom" ? aiProviderLabel(config.provider, t) : preset.label;
