@@ -56,6 +56,7 @@ import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntim
 import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
 import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
+import { runSidebarSearchTasks, type SidebarSearchTask } from "./sidebarSearchTaskRunner";
 import TreeItem from "./TreeItem.vue";
 import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
 import SidebarListOptionsIcon from "./SidebarListOptionsIcon.vue";
@@ -297,7 +298,7 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
     const restoreTasks = restoreTrackedSearchTargets();
     const searchGeneration = sidebarSearchLoadingTracker.begin();
     isSidebarSearchLoading.value = true;
-    void Promise.allSettled([loadRegexTableSearchIndexes(), ...restoreTasks])
+    void Promise.allSettled([loadRegexTableSearchIndexes(), runSidebarSearchTasks(restoreTasks)])
       .then(() => {
         if (restoreTasks.length > 0) refreshActiveSidebarTableSearches();
       })
@@ -311,7 +312,7 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
     isSidebarSearchLoading.value = false;
     const restoreTasks = restoreTrackedSearchTargets();
     if (restoreTasks.length > 0) {
-      void Promise.all(restoreTasks)
+      void runSidebarSearchTasks(restoreTasks)
         .then(() => refreshActiveSidebarTableSearches())
         .catch(() => {});
     }
@@ -327,7 +328,7 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
     sidebarSearchLoadingTracker.cancel();
     isSidebarSearchLoading.value = false;
   }
-  const searchWork = newQuery ? loadSidebarSearchTargets(newQuery, preservesSearchSubtree) : Promise.allSettled(restoreTasks);
+  const searchWork = newQuery ? loadSidebarSearchTargets(newQuery, preservesSearchSubtree) : runSidebarSearchTasks(restoreTasks);
   void searchWork
     .then(() => {
       if (!newQuery && oldQuery) refreshActiveSidebarTableSearches();
@@ -366,23 +367,23 @@ async function loadSidebarSearchTargets(query: string, preservesNodeSubtree?: (n
   if (!query) return;
   const refreshedNodeIds = searchRefreshedNodeIds;
   const scheduledNodeIds = new Set<string>();
-  let tasks: Promise<void>[] = [];
+  let tasks: SidebarSearchTask[] = [];
   do {
     tasks = [];
     for (const root of store.treeNodes) {
       collectExpandedObjectSearchTargets(root, tasks, refreshedNodeIds, preservesNodeSubtree, false, scheduledNodeIds);
     }
     if (tasks.length === 0) return;
-    await Promise.allSettled(tasks);
+    await runSidebarSearchTasks(tasks);
   } while (deferredSearchQuery.value === query && store.sidebarSearchQuery === query);
 }
 
-function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>) {
+function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearchTask[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>) {
   const preservesSearchSubtree = ancestorPreservesSearchSubtree || (!!refreshedNodeIds && !!preservesNodeSubtree?.(node));
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
     if (store.connectedIds.has(node.connectionId) && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
       scheduledNodeIds?.add(node.id);
-      tasks.push(store.loadConnectedConnectionRootForSidebarSearch(node.connectionId));
+      tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(node.connectionId));
     }
     if (node.connectionId !== store.activeConnectionId) return;
   }
@@ -391,13 +392,13 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
       scheduledNodeIds?.add(node.id);
       if (preservesSearchSubtree) {
         if (refreshedNodeIds.delete(node.id)) {
-          tasks.push(store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+          tasks.push(() => store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
         }
       } else {
         const wasCollapsed = node.isExpanded !== true;
         refreshedNodeIds.add(node.id);
         if (wasCollapsed) searchExpansionState.markFiltered(node.id, true);
-        tasks.push(store.refreshTreeNode(node));
+        tasks.push(() => store.refreshTreeNode(node));
       }
     }
     return;
@@ -406,7 +407,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
     scheduledNodeIds?.add(node.id);
     const wasCollapsed = node.isExpanded !== true;
     searchExpansionState.markFiltered(node.id, wasCollapsed);
-    tasks.push(store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+    tasks.push(() => store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
   }
   if (refreshedNodeIds && node.children) {
     for (const child of node.children) {
@@ -415,11 +416,11 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
         scheduledNodeIds?.add(child.id);
         if (preservesSearchSubtree) {
           if (searchExpansionState.markUnfiltered(child.id)) {
-            tasks.push(store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+            tasks.push(() => store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
           }
         } else {
           searchExpansionState.markFiltered(child.id, !child.isExpanded);
-          tasks.push(store.loadObjectGroupChildren(child, { force: true }));
+          tasks.push(() => store.loadObjectGroupChildren(child, { force: true }));
         }
       }
     }
@@ -431,16 +432,14 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
         // instead of reloading and leaving it open.
         node.isExpanded = false;
       } else {
-        tasks.push(store.loadObjectGroupChildren(node, { force: true }));
+        tasks.push(() => store.loadObjectGroupChildren(node, { force: true }));
       }
     } else if (simpleObjectParentTypes.has(node.type)) {
       const shouldCollapse = searchAutoExpandedNodeIds.has(node.id);
-      const restore = store.refreshTreeNode(node);
-      tasks.push(
-        restore.then(() => {
-          if (shouldCollapse) node.isExpanded = false;
-        }),
-      );
+      tasks.push(async () => {
+        await store.refreshTreeNode(node);
+        if (shouldCollapse) node.isExpanded = false;
+      });
     }
   }
   if (node.children) {
@@ -450,9 +449,9 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
   }
 }
 
-function restoreTrackedSearchTargets(): Promise<void>[] {
+function restoreTrackedSearchTargets(): SidebarSearchTask[] {
   if (!searchExpansionState.hasTrackedNodes()) return [];
-  const tasks: Promise<void>[] = [];
+  const tasks: SidebarSearchTask[] = [];
   for (const root of store.treeNodes) {
     collectExpandedObjectSearchTargets(root, tasks);
   }
