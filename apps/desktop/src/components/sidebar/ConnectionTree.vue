@@ -317,23 +317,18 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
     }
     return;
   }
-  const tasks: Promise<void>[] = [];
   const preservesSearchSubtree = newQuery ? createSidebarSearchSubtreePreserver(newQuery, searchableNodeTypes.value) : undefined;
-  for (const root of store.treeNodes) {
-    collectExpandedObjectSearchTargets(root, tasks, newQuery ? searchRefreshedNodeIds : undefined, preservesSearchSubtree);
-  }
-  if (!newQuery && oldQuery) {
-    searchExpansionState.clear();
-  }
+  const restoreTasks = !newQuery && oldQuery ? restoreTrackedSearchTargets() : [];
   let searchGeneration = -1;
-  if (newQuery && tasks.length > 0) {
+  if (newQuery) {
     searchGeneration = sidebarSearchLoadingTracker.begin();
     isSidebarSearchLoading.value = true;
   } else {
     sidebarSearchLoadingTracker.cancel();
     isSidebarSearchLoading.value = false;
   }
-  void Promise.allSettled(tasks)
+  const searchWork = newQuery ? loadSidebarSearchTargets(newQuery, preservesSearchSubtree) : Promise.allSettled(restoreTasks);
+  void searchWork
     .then(() => {
       if (!newQuery && oldQuery) refreshActiveSidebarTableSearches();
     })
@@ -358,34 +353,66 @@ const searchableObjectGroupTypes = new Set<TreeNodeType>([
   "group-types",
 ]);
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
-const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "job", "package", "package-body", "type", "type-body", "load-more"]);
 
 function isSimpleObjectSearchParent(node: TreeNode): boolean {
-  return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && (!!node.children?.some((child) => simpleObjectChildTypes.has(child.type)) || !!store.sidebarTableSearchQueries[node.id]?.trim());
+  return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.connectionId != null && node.database != null;
 }
 
-function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false) {
+function isSidebarSearchContainer(node: TreeNode): boolean {
+  return simpleObjectParentTypes.has(node.type) && node.connectionId != null && node.database != null;
+}
+
+async function loadSidebarSearchTargets(query: string, preservesNodeSubtree?: (node: TreeNode) => boolean) {
+  if (!query) return;
+  const refreshedNodeIds = searchRefreshedNodeIds;
+  const scheduledNodeIds = new Set<string>();
+  let tasks: Promise<void>[] = [];
+  do {
+    tasks = [];
+    for (const root of store.treeNodes) {
+      collectExpandedObjectSearchTargets(root, tasks, refreshedNodeIds, preservesNodeSubtree, false, scheduledNodeIds);
+    }
+    if (tasks.length === 0) return;
+    await Promise.allSettled(tasks);
+  } while (deferredSearchQuery.value === query && store.sidebarSearchQuery === query);
+}
+
+function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>) {
   const preservesSearchSubtree = ancestorPreservesSearchSubtree || (!!refreshedNodeIds && !!preservesNodeSubtree?.(node));
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
-    if (store.connectedIds.has(node.connectionId)) {
+    if (store.connectedIds.has(node.connectionId) && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
+      scheduledNodeIds?.add(node.id);
       tasks.push(store.loadConnectedConnectionRootForSidebarSearch(node.connectionId));
     }
     if (node.connectionId !== store.activeConnectionId) return;
   }
   if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
-    if (preservesSearchSubtree) {
-      if (refreshedNodeIds.delete(node.id)) {
-        tasks.push(store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+    if (!scheduledNodeIds || !scheduledNodeIds.has(node.id)) {
+      scheduledNodeIds?.add(node.id);
+      if (preservesSearchSubtree) {
+        if (refreshedNodeIds.delete(node.id)) {
+          tasks.push(store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+        }
+      } else {
+        const wasCollapsed = node.isExpanded !== true;
+        refreshedNodeIds.add(node.id);
+        if (wasCollapsed) searchExpansionState.markFiltered(node.id, true);
+        tasks.push(store.refreshTreeNode(node));
       }
-    } else {
-      refreshedNodeIds.add(node.id);
-      tasks.push(store.refreshTreeNode(node));
     }
     return;
   }
-  if (refreshedNodeIds && node.isExpanded && node.children) {
+  if (refreshedNodeIds && isSidebarSearchContainer(node) && !node.children?.length && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
+    scheduledNodeIds?.add(node.id);
+    const wasCollapsed = node.isExpanded !== true;
+    searchExpansionState.markFiltered(node.id, wasCollapsed);
+    tasks.push(store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+  }
+  if (refreshedNodeIds && node.children) {
     for (const child of node.children) {
       if (child.connectionId && searchableObjectGroupTypes.has(child.type)) {
+        if (scheduledNodeIds?.has(child.id)) continue;
+        scheduledNodeIds?.add(child.id);
         if (preservesSearchSubtree) {
           if (searchExpansionState.markUnfiltered(child.id)) {
             tasks.push(store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
@@ -407,12 +434,18 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
         tasks.push(store.loadObjectGroupChildren(node, { force: true }));
       }
     } else if (simpleObjectParentTypes.has(node.type)) {
-      tasks.push(store.refreshTreeNode(node));
+      const shouldCollapse = searchAutoExpandedNodeIds.has(node.id);
+      const restore = store.refreshTreeNode(node);
+      tasks.push(
+        restore.then(() => {
+          if (shouldCollapse) node.isExpanded = false;
+        }),
+      );
     }
   }
   if (node.children) {
     for (const child of node.children) {
-      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds, preservesNodeSubtree, preservesSearchSubtree);
+      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds, preservesNodeSubtree, preservesSearchSubtree, scheduledNodeIds);
     }
   }
 }
